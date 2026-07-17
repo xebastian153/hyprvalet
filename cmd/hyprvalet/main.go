@@ -21,6 +21,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
+	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
 	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
@@ -66,6 +67,8 @@ func main() {
 	case "disarm":
 		requireArg(args, "disarm", "<capability>")
 		disarmCap(reg, args[1])
+	case "recipe":
+		recipeCmd(reg, rules, args[1:])
 	case "run":
 		requireArg(args, "run", "<capability> [key=value ...]")
 		runCap(reg, rules, args[1], args[2:])
@@ -92,9 +95,14 @@ func usage() {
 	fmt.Println("  hyprvalet arm <capability>           grant a bounded window to a gated capability")
 	fmt.Println("  hyprvalet disarm <capability>        revoke a grant immediately")
 	fmt.Println("  hyprvalet armed                      list currently-armed capabilities")
+	fmt.Println("  hyprvalet recipe list                list recipes")
+	fmt.Println("  hyprvalet recipe show <name>         preview a recipe's steps")
+	fmt.Println("  hyprvalet recipe run <name>          run a recipe (each step is still gated)")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
+	fmt.Println("Recipes directory:")
+	fmt.Printf("  %s\n", recipefile.RecipesDir())
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  hyprvalet workspace.switch workspace=3")
@@ -137,24 +145,12 @@ func runCap(reg *core.Registry, rules core.PolicyRules, id string, rest []string
 		os.Exit(1)
 	}
 
-	switch core.Evaluate(rules, armState, cap, now) {
-	case core.DecisionDeny:
-		r := rules.Resolve(cap)
-		if r.RequiresArming && !armState.IsArmed(id, now) {
-			fmt.Fprintf(os.Stderr,
-				"denied: %q requires arming — run 'hyprvalet arm %s' to grant %s\n",
-				id, id, rules.ArmFor(cap))
-		} else {
-			fmt.Fprintf(os.Stderr, "denied by policy: %q\n", id)
-		}
+	switch gate(cap, args, rules, armState, now) {
+	case gateDenied:
 		os.Exit(1)
-	case core.DecisionAsk:
-		if !confirm(cap, args) {
-			fmt.Println("aborted")
-			return
-		}
-	case core.DecisionAllow:
-		// proceed
+	case gateDeclined:
+		fmt.Println("aborted")
+		return
 	}
 
 	out, err := cap.Run(context.Background(), args)
@@ -164,6 +160,42 @@ func runCap(reg *core.Registry, rules core.PolicyRules, id string, rest []string
 	}
 	if out != "" {
 		fmt.Println(out)
+	}
+}
+
+// gateResult is the outcome of evaluating the permission policy for one call.
+type gateResult int
+
+const (
+	gateProceed  gateResult = iota // policy allows, or the human confirmed
+	gateDenied                     // policy denies; a reason was printed to stderr
+	gateDeclined                   // policy asked and the human said no
+)
+
+// gate evaluates the policy for one capability call and performs any
+// confirmation prompt. It prints the denial reason itself; the caller decides
+// what a denied or declined outcome means for its flow (a single run aborts;
+// a recipe stops). It is shared so recipes and hand-typed calls gate identically
+// — a recipe is never a permission bypass.
+func gate(cap core.Capability, args core.Args, rules core.PolicyRules, armState core.ArmState, now time.Time) gateResult {
+	switch core.Evaluate(rules, armState, cap, now) {
+	case core.DecisionDeny:
+		r := rules.Resolve(cap)
+		if r.RequiresArming && !armState.IsArmed(cap.ID(), now) {
+			fmt.Fprintf(os.Stderr,
+				"denied: %q requires arming — run 'hyprvalet arm %s' to grant %s\n",
+				cap.ID(), cap.ID(), rules.ArmFor(cap))
+		} else {
+			fmt.Fprintf(os.Stderr, "denied by policy: %q\n", cap.ID())
+		}
+		return gateDenied
+	case core.DecisionAsk:
+		if confirm(cap, args) {
+			return gateProceed
+		}
+		return gateDeclined
+	default:
+		return gateProceed
 	}
 }
 
@@ -237,6 +269,106 @@ func listArmed() {
 		fmt.Printf("%-28s %s remaining (until %s)\n",
 			id, until.Sub(now).Round(time.Second), until.Local().Format("15:04:05"))
 	}
+}
+
+func recipeCmd(reg *core.Registry, rules core.PolicyRules, args []string) {
+	// Recipes load lazily, and fail closed: a broken recipe blocks recipe
+	// commands, not the rest of the CLI.
+	book, err := recipefile.Load(recipefile.RecipesDir(), reg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "recipe error: %v\n", err)
+		os.Exit(1)
+	}
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: hyprvalet recipe <list|show|run> [name]")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "list":
+		listRecipes(book)
+	case "show":
+		requireArg(args, "recipe show", "<name>")
+		printPlan(getRecipe(book, args[1]))
+	case "run":
+		requireArg(args, "recipe run", "<name>")
+		runRecipe(reg, rules, getRecipe(book, args[1]))
+	default:
+		fmt.Fprintf(os.Stderr, "unknown recipe subcommand %q (want list|show|run)\n", args[0])
+		os.Exit(2)
+	}
+}
+
+func getRecipe(book *core.RecipeBook, name string) core.Recipe {
+	r, ok := book.Get(name)
+	if !ok {
+		fmt.Fprintf(os.Stderr, "unknown recipe %q — run 'hyprvalet recipe list'\n", name)
+		os.Exit(2)
+	}
+	return r
+}
+
+func listRecipes(book *core.RecipeBook) {
+	recipes := book.List()
+	if len(recipes) == 0 {
+		fmt.Printf("no recipes — add *.toml files under %s\n", recipefile.RecipesDir())
+		return
+	}
+	for _, r := range recipes {
+		fmt.Printf("%-20s %s (%d steps)\n", r.Name, r.Description, len(r.Steps))
+	}
+}
+
+func printPlan(r core.Recipe) {
+	fmt.Printf("%s — %s\n", r.Name, r.Description)
+	for i, s := range r.Steps {
+		fmt.Printf("  %d. %s %s\n", i+1, s.Capability, formatArgs(s.Args))
+	}
+}
+
+func formatArgs(a core.Args) string {
+	parts := make([]string, 0, len(a))
+	for k, v := range a {
+		parts = append(parts, fmt.Sprintf("%s=%s", k, v))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, " ")
+}
+
+func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
+	now := time.Now()
+	armState, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("running recipe %q:\n", r.Name)
+	printPlan(r)
+
+	n := len(r.Steps)
+	for i, s := range r.Steps {
+		// Validated at load, so Get always succeeds; the check is defensive.
+		cap, ok := reg.Get(s.Capability)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "recipe %q step %d/%d: unknown capability %q\n", r.Name, i+1, n, s.Capability)
+			os.Exit(1)
+		}
+		switch gate(cap, s.Args, rules, armState, now) {
+		case gateDenied, gateDeclined:
+			fmt.Fprintf(os.Stderr, "recipe %q aborted at step %d/%d (%s)\n", r.Name, i+1, n, s.Capability)
+			os.Exit(1)
+		}
+		out, err := cap.Run(context.Background(), s.Args)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "recipe %q failed at step %d/%d (%s): %v\n", r.Name, i+1, n, s.Capability, err)
+			os.Exit(1)
+		}
+		if out == "" {
+			out = s.Capability + " ok"
+		}
+		fmt.Printf("  [%d/%d] %s\n", i+1, n, out)
+	}
+	fmt.Printf("recipe %q done\n", r.Name)
 }
 
 func parseArgs(rest []string) (core.Args, error) {
