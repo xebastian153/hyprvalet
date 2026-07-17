@@ -9,6 +9,10 @@
 go.work
 go.work.sum
 
+# Local AI-tooling (personal engram memory scope) and living working state
+.engram/
+HANDOFF.md
+
 # Editor / OS cruft
 .DS_Store
 *.swp
