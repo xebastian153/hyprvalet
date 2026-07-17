@@ -19,8 +19,10 @@ func Capabilities() []core.Capability {
 
 type runCommand struct{}
 
-func (runCommand) ID() string             { return "omarchy.run" }
-func (runCommand) Description() string     { return "Run an omarchy CLI subcommand (e.g. \"restart waybar\")" }
+func (runCommand) ID() string { return "omarchy.run" }
+func (runCommand) Description() string {
+	return "Run an omarchy CLI subcommand (e.g. \"restart waybar\")"
+}
 func (runCommand) Access() core.AccessKind { return core.AccessCommand }
 
 // Risk is Confirm: omarchy subcommands can restart services or refresh configs,
