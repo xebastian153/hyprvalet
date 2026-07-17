@@ -33,6 +33,29 @@ func dispatch(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// shellMeta are characters a shell would interpret to chain, redirect, expand,
+// or substitute commands. hyprctl runs an exec string through a shell, so any
+// of these could smuggle a second command past a single app launch.
+const shellMeta = ";&|<>$`\n\r\\!*?(){}[]"
+
+// validateLaunchCmd trims and checks the "cmd" arg for app.open. It guarantees a
+// single, metacharacter-free launch command so a caller cannot chain a second
+// command onto a launch. It deliberately does NOT vouch for the binary itself —
+// "rm -rf ~" is metacharacter-free yet destructive — which is why app.open is
+// Confirm-tier rather than Safe.
+func validateLaunchCmd(raw string) (string, error) {
+	cmd := strings.TrimSpace(raw)
+	if cmd == "" {
+		return "", fmt.Errorf("missing required arg %q (the command to launch)", "cmd")
+	}
+	if i := strings.IndexAny(cmd, shellMeta); i >= 0 {
+		return "", fmt.Errorf(
+			"arg %q may not contain the shell metacharacter %q — app.open launches a single program (e.g. %q or %q), not a shell command",
+			"cmd", string(cmd[i]), "firefox", "alacritty -e nvim")
+	}
+	return cmd, nil
+}
+
 // workspaceArg validates and parses the shared "workspace" parameter.
 func workspaceArg(args core.Args) (int, error) {
 	raw, ok := args["workspace"]
@@ -51,7 +74,7 @@ func workspaceArg(args core.Args) (int, error) {
 
 type switchWorkspace struct{}
 
-func (switchWorkspace) ID() string             { return "workspace.switch" }
+func (switchWorkspace) ID() string              { return "workspace.switch" }
 func (switchWorkspace) Description() string     { return "Switch to a workspace by number" }
 func (switchWorkspace) Access() core.AccessKind { return core.AccessWorkspace }
 func (switchWorkspace) Risk() core.Risk         { return core.RiskSafe }
@@ -69,8 +92,10 @@ func (switchWorkspace) Run(ctx context.Context, args core.Args) (string, error) 
 
 type moveWindowToWorkspace struct{}
 
-func (moveWindowToWorkspace) ID() string             { return "window.move_to_workspace" }
-func (moveWindowToWorkspace) Description() string     { return "Move the active window to a workspace by number" }
+func (moveWindowToWorkspace) ID() string { return "window.move_to_workspace" }
+func (moveWindowToWorkspace) Description() string {
+	return "Move the active window to a workspace by number"
+}
 func (moveWindowToWorkspace) Access() core.AccessKind { return core.AccessWindow }
 func (moveWindowToWorkspace) Risk() core.Risk         { return core.RiskSafe }
 func (moveWindowToWorkspace) Params() []string        { return []string{"workspace"} }
@@ -87,15 +112,21 @@ func (moveWindowToWorkspace) Run(ctx context.Context, args core.Args) (string, e
 
 type openApp struct{}
 
-func (openApp) ID() string             { return "app.open" }
+func (openApp) ID() string              { return "app.open" }
 func (openApp) Description() string     { return "Launch an application via hyprctl exec" }
 func (openApp) Access() core.AccessKind { return core.AccessApp }
-func (openApp) Risk() core.Risk         { return core.RiskSafe }
-func (openApp) Params() []string        { return []string{"cmd"} }
+
+// Risk is Confirm, not Safe. hyprctl runs the exec string through a shell.
+// validateLaunchCmd stops command *chaining*, but it cannot tell a benign
+// launcher ("firefox") from a destructive binary ("rm -rf ~") — both are single,
+// metacharacter-free commands. Until an app allowlist lands (M1), the only
+// remaining safety property is human-in-the-loop, so every launch is confirmed.
+func (openApp) Risk() core.Risk  { return core.RiskConfirm }
+func (openApp) Params() []string { return []string{"cmd"} }
 func (openApp) Run(ctx context.Context, args core.Args) (string, error) {
-	cmd := strings.TrimSpace(args["cmd"])
-	if cmd == "" {
-		return "", fmt.Errorf("missing required arg %q (the command to launch)", "cmd")
+	cmd, err := validateLaunchCmd(args["cmd"])
+	if err != nil {
+		return "", err
 	}
 	if _, err := dispatch(ctx, "exec", cmd); err != nil {
 		return "", err
