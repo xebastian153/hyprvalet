@@ -111,6 +111,9 @@ every capability because you broke them in M0.
 
 ## Convergent patterns across the five sources
 
+> Per-repo `file:line` evidence for every pattern below — and the exact commit
+> each repo was analyzed at — is in `SOURCES.md`.
+
 Five teams, different languages, no shared code — and they converge on the same
 load-bearing patterns. When that happens, it's structure, not style:
 

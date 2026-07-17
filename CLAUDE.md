@@ -5,9 +5,10 @@ natural language. The model never runs arbitrary shell — it invokes typed
 capabilities from an explicit allowlist, and destructive actions require
 confirmation.
 
-**Read `HANDOFF.md` first.** It carries current state, next actions, the sources
-this design is drawn from, and the decisions worth not re-litigating. The deep
-architecture lives in `docs/DESIGN.md`.
+**Read `HANDOFF.md` first.** It carries current state, next actions, and the
+decisions worth not re-litigating. The deep architecture lives in `docs/DESIGN.md`;
+the design's provenance — which decision came from which studied repo, with
+`file:line` evidence and the exact commit analyzed — is in `docs/SOURCES.md`.
 
 ## Non-negotiables
 
