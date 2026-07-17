@@ -1,0 +1,34 @@
+# hyprvalet — recipe (example)
+#
+# A recipe is a named, deterministic sequence of capability calls: a macro for
+# something you do daily. Copy this into your recipes directory and edit it.
+#
+#   mkdir -p ~/.config/hyprvalet/recipes
+#   cp configs/recipes/work.example.toml ~/.config/hyprvalet/recipes/work.toml
+#   hyprvalet recipe run work
+#
+# Rules:
+#   - Every step is a typed capability from the allowlist (see `hyprvalet list`).
+#     A recipe can do nothing a capability cannot already do.
+#   - Recipes do NOT bypass permissions: each step is still gated by your policy.
+#     A step the policy denies aborts the recipe; a step it asks about prompts.
+#     So an arming-gated capability (e.g. app.open) needs `hyprvalet arm` first.
+#   - A recipe that tries to restart or kill hyprvalet's host is refused at load
+#     by the lifecycle guard.
+
+name = "work"
+description = "Switch to workspace 2 and refresh the bar"
+
+[[step]]
+capability = "workspace.switch"
+args = { workspace = "2" }
+
+[[step]]
+capability = "omarchy.run"
+args = { args = "restart waybar" }
+
+# Launching apps is arming-gated by the example policy — arm it first, or remove
+# these steps. Uncomment to include them:
+# [[step]]
+# capability = "app.open"
+# args = { cmd = "firefox" }
