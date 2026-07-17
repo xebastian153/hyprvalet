@@ -1,0 +1,58 @@
+# hyprvalet — permission policy (example)
+#
+# Copy this to your config location and edit it. This file is YOURS: it decides
+# what hyprvalet is allowed to do on your machine. hyprvalet ships conservative
+# defaults; this file overrides them.
+#
+#   mkdir -p ~/.config/hyprvalet
+#   cp configs/policy.example.toml ~/.config/hyprvalet/policy.toml
+#
+# A decision is one of:
+#   "allow"  run without asking
+#   "ask"    prompt for [y/N] confirmation before running
+#   "deny"   never run
+#
+# Precedence, most specific wins (a whole rule is applied, fields are not merged):
+#   [capability."<id>"]  >  [access]  >  [risk]  >  default
+#
+# If this file is missing, the built-in defaults apply (safe=allow, confirm=ask,
+# forbidden=deny, everything else ask). If this file is present but malformed,
+# hyprvalet refuses to run anything — a broken policy fails closed.
+
+# Fallback when nothing more specific matches.
+default = "ask"
+
+# Default arming window, in minutes, for capabilities that require arming but do
+# not set their own arm_minutes.
+default_arm_minutes = 5
+
+# By risk tier — the coarse default the capability author assigned.
+[risk]
+safe      = "allow"   # reversible / low impact (switch workspace, move window)
+confirm   = "ask"     # disruptive / not trivially reversible
+forbidden = "deny"    # never runs, regardless of anything below
+
+# By what the action touches. Uncomment to constrain a whole class.
+# [access]
+# command = "ask"     # anything that shells out to a CLI (e.g. omarchy.run)
+
+# By exact capability id — the finest control, wins over everything above.
+
+# Launching arbitrary programs is powerful: gate it behind arming so it is OFF
+# by default and only available for a bounded window after you explicitly run
+# `hyprvalet arm app.open`.
+[capability."app.open"]
+decision        = "ask"
+requires_arming = true
+arm_minutes     = 5
+
+# omarchy.run can restart services and refresh configs — keep it a confirmation.
+[capability."omarchy.run"]
+decision = "ask"
+
+# Everyday, reversible navigation: let it run without friction.
+[capability."workspace.switch"]
+decision = "allow"
+
+[capability."window.move_to_workspace"]
+decision = "allow"
