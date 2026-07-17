@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
+	"github.com/xebastian153/hyprvalet/internal/adapters/ollama"
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
@@ -69,6 +70,8 @@ func main() {
 		disarmCap(reg, args[1])
 	case "recipe":
 		recipeCmd(reg, rules, args[1:])
+	case "ask":
+		askCmd(reg, rules, args[1:])
 	case "run":
 		requireArg(args, "run", "<capability> [key=value ...]")
 		runCap(reg, rules, args[1], args[2:])
@@ -98,6 +101,7 @@ func usage() {
 	fmt.Println("  hyprvalet recipe list                list recipes")
 	fmt.Println("  hyprvalet recipe show <name>         preview a recipe's steps")
 	fmt.Println("  hyprvalet recipe run <name>          run a recipe (each step is still gated)")
+	fmt.Println("  hyprvalet ask \"<request>\"            map natural language to one capability (local LLM)")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -369,6 +373,63 @@ func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
 		fmt.Printf("  [%d/%d] %s\n", i+1, n, out)
 	}
 	fmt.Printf("recipe %q done\n", r.Name)
+}
+
+func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
+	request := strings.TrimSpace(strings.Join(rest, " "))
+	if request == "" {
+		fmt.Fprintln(os.Stderr, "usage: hyprvalet ask \"<what you want>\"")
+		os.Exit(2)
+	}
+
+	// The model may choose from every capability; the allowlist and the gate,
+	// not the prompt, are what keep a wrong choice safe.
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	intent, err := ollama.Default().Interpret(ctx, request, reg.List())
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "reasoning failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "(is ollama running? try: systemctl status ollama)")
+		os.Exit(1)
+	}
+
+	cap, err := core.ResolveIntent(reg, intent)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		if intent.Reasoning != "" {
+			fmt.Fprintf(os.Stderr, "(model said: %s)\n", intent.Reasoning)
+		}
+		os.Exit(1)
+	}
+
+	// Transparency: show what the model decided before anything runs.
+	fmt.Printf("understood: %s %s\n", cap.ID(), formatArgs(intent.Args))
+	if intent.Reasoning != "" {
+		fmt.Printf("  reasoning: %s\n", intent.Reasoning)
+	}
+
+	now := time.Now()
+	armState, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
+		os.Exit(1)
+	}
+	switch gate(cap, intent.Args, rules, armState, now) {
+	case gateDenied:
+		os.Exit(1)
+	case gateDeclined:
+		fmt.Println("aborted")
+		return
+	}
+
+	out, err := cap.Run(context.Background(), intent.Args)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if out != "" {
+		fmt.Println(out)
+	}
 }
 
 func parseArgs(rest []string) (core.Args, error) {
