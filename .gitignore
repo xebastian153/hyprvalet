@@ -9,8 +9,9 @@
 go.work
 go.work.sum
 
-# Local AI-tooling (personal engram memory scope) and living working state
+# Local AI-tooling (personal engram memory + gentle-ai skill registry) and working state
 .engram/
+.atl/
 HANDOFF.md
 
 # Editor / OS cruft
