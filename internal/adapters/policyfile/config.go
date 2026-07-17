@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/BurntSushi/toml"
-	"github.com/SebasDevMag/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
 // defaultArmMinutes is the arming window used when neither a capability rule nor

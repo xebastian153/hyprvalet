@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/SebasDevMag/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
 // Capabilities returns every Hyprland-backed capability.

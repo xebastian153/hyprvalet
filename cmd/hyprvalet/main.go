@@ -18,10 +18,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/SebasDevMag/hyprvalet/internal/adapters/hypr"
-	"github.com/SebasDevMag/hyprvalet/internal/adapters/omarchy"
-	"github.com/SebasDevMag/hyprvalet/internal/adapters/policyfile"
-	"github.com/SebasDevMag/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
+	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
+	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
+	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
 func buildRegistry() *core.Registry {

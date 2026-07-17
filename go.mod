@@ -1,4 +1,4 @@
-module github.com/SebasDevMag/hyprvalet
+module github.com/xebastian153/hyprvalet
 
 go 1.23
 

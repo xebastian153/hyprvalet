@@ -63,7 +63,7 @@ Requires [Go](https://go.dev/) 1.23+, and a running Hyprland session with
 `hyprctl` (and `omarchy` for the omarchy capability).
 
 ```bash
-git clone https://github.com/SebasDevMag/hyprvalet.git
+git clone https://github.com/xebastian153/hyprvalet.git
 cd hyprvalet
 go build -o hyprvalet ./cmd/hyprvalet
 

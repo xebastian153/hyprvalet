@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/SebasDevMag/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
 // The adapter must satisfy the core port. These fail at compile time if a

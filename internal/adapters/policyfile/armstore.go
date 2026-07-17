@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/SebasDevMag/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
 // ArmStatePath returns where temporal arming grants are persisted. It prefers

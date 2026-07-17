@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SebasDevMag/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
 func TestArmStateRoundTrip(t *testing.T) {

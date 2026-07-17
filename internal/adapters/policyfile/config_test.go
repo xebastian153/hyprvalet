@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/SebasDevMag/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
 func writeTemp(t *testing.T, content string) string {
