@@ -29,6 +29,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
+	"github.com/xebastian153/hyprvalet/internal/adapters/tts"
 	"github.com/xebastian153/hyprvalet/internal/adapters/whisper"
 	"github.com/xebastian153/hyprvalet/internal/core"
 	"github.com/xebastian153/hyprvalet/internal/daemon"
@@ -540,6 +541,19 @@ func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
 	fmt.Printf("recipe %q done\n", r.Name)
 }
 
+// maxInterpretAttempts bounds the corrective loop: the first try plus one
+// retry fed with the validation error. A model that cannot correct itself with
+// explicit feedback will not improve by hammering; the error goes to the human.
+const maxInterpretAttempts = 2
+
+// correctiveRequest re-poses the user's request together with the failure the
+// previous attempt earned, so the model corrects a concrete mistake instead of
+// guessing blind.
+func correctiveRequest(request string, err error) string {
+	return fmt.Sprintf("%s\n\n(Your previous attempt was rejected: %v. Choose again from the capability list and fill every argument with a concrete literal value.)",
+		request, err)
+}
+
 func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 	request := strings.TrimSpace(strings.Join(rest, " "))
 	if request == "" {
@@ -547,47 +561,67 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 		os.Exit(2)
 	}
 
-	// The model may choose from every capability; the allowlist and the gate,
-	// not the prompt, are what keep a wrong choice safe.
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	intent, err := ollama.Default().Interpret(ctx, request, reg.List(), recentEvents())
-	cancel()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "reasoning failed: %v\n", err)
-		fmt.Fprintln(os.Stderr, "(is ollama running? try: systemctl status ollama)")
-		os.Exit(1)
-	}
-
-	cap, err := core.ResolveIntent(reg, intent)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		if intent.Reasoning != "" {
-			fmt.Fprintf(os.Stderr, "(model said: %s)\n", intent.Reasoning)
+	// The corrective loop: interpret, gate, run — and when the capability
+	// rejects the model's arguments (a ValidationError, the model's own
+	// mistake), re-ask once with the error as feedback. Every retry is a brand
+	// new intent that walks the full gate again; approval never carries over.
+	attempt := request
+	for i := 1; ; i++ {
+		// The model may choose from every capability; the allowlist and the
+		// gate, not the prompt, are what keep a wrong choice safe.
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		intent, err := ollama.Default().Interpret(ctx, attempt, reg.List(), recentEvents())
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reasoning failed: %v\n", err)
+			fmt.Fprintln(os.Stderr, "(is ollama running? try: systemctl status ollama)")
+			os.Exit(1)
 		}
-		os.Exit(1)
-	}
 
-	// Transparency: show what the model decided before anything runs.
-	fmt.Printf("understood: %s %s\n", cap.ID(), formatArgs(intent.Args))
-	if intent.Reasoning != "" {
-		fmt.Printf("  reasoning: %s\n", intent.Reasoning)
-	}
+		cap, err := core.ResolveIntent(reg, intent)
+		if err != nil {
+			// A hallucinated capability is the model's mistake too — feed it
+			// back. An empty match ("nothing fits") is an answer, not an error.
+			if intent.Capability != "" && i < maxInterpretAttempts {
+				fmt.Fprintf(os.Stderr, "model chose badly: %v — asking it to correct\n", err)
+				attempt = correctiveRequest(request, err)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			if intent.Reasoning != "" {
+				fmt.Fprintf(os.Stderr, "(model said: %s)\n", intent.Reasoning)
+			}
+			os.Exit(1)
+		}
 
-	dc := loadDecisionCtx(rules)
-	switch gate(cap, intent.Args, &dc) {
-	case gateDenied:
-		os.Exit(1)
-	case gateDeclined:
-		fmt.Println("aborted")
+		// Transparency: show what the model decided before anything runs.
+		fmt.Printf("understood: %s %s\n", cap.ID(), formatArgs(intent.Args))
+		if intent.Reasoning != "" {
+			fmt.Printf("  reasoning: %s\n", intent.Reasoning)
+		}
+
+		dc := loadDecisionCtx(rules)
+		switch gate(cap, intent.Args, &dc) {
+		case gateDenied:
+			os.Exit(1)
+		case gateDeclined:
+			fmt.Println("aborted")
+			return
+		}
+
+		out, err := execCap(cap, intent.Args)
+		if err != nil {
+			if core.IsValidation(err) && i < maxInterpretAttempts {
+				fmt.Fprintf(os.Stderr, "arguments rejected: %v — asking the model to correct\n", err)
+				attempt = correctiveRequest(request, err)
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println(out)
 		return
 	}
-
-	out, err := execCap(cap, intent.Args)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println(out)
 }
 
 // planCmd runs the M3 planner. With execute=false ("plan") it previews only;
@@ -744,7 +778,7 @@ func voiceCmd() {
 	}
 	fmt.Printf("heard: %s\n", text)
 
-	ctlPlan([]string{text}, true)
+	ctlPlan([]string{text}, true, tts.Default())
 }
 
 // logCmd shows the audit trail: the most recent attempted actions and what
@@ -806,63 +840,89 @@ func ctlCmd(args []string) {
 	case "ask":
 		ctlAsk(args[1:])
 	case "plan":
-		ctlPlan(args[1:], false)
+		ctlPlan(args[1:], false, nil)
 	case "do":
-		ctlPlan(args[1:], true)
+		ctlPlan(args[1:], true, nil)
 	default:
 		fmt.Fprintf(os.Stderr, "unknown ctl op %q (want ping|run|ask|plan|do)\n", args[0])
 		os.Exit(2)
 	}
 }
 
+// say speaks text when a speaker is present. Speech is an output garnish:
+// failures warn and are swallowed, never changing what the command does.
+func say(speaker *tts.Client, text string) {
+	if speaker == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := speaker.Speak(ctx, text); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: speech failed: %v\n", err)
+	}
+}
+
 // ctlAsk has the daemon reason a single intent from natural language, previews
 // it, then runs it through the daemon's two-phase confirm flow — the reasoning
 // lives in the resident process; the human prompt stays here in the client.
+// When the daemon reports a retryable failure (the capability rejected the
+// model's arguments), it re-asks once with the error as feedback.
 func ctlAsk(rest []string) {
 	request := strings.TrimSpace(strings.Join(rest, " "))
 	if request == "" {
 		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl ask \"<what you want>\"")
 		os.Exit(2)
 	}
-	resp, err := daemon.AskViaDaemon(daemon.SocketPath(), request)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
-	}
-	if resp.Status == protocol.StatusError {
-		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
-		os.Exit(1)
-	}
-	if len(resp.Plan) == 0 {
-		fmt.Println("no match — the model found nothing it could do for that request")
+
+	attempt := request
+	for i := 1; ; i++ {
+		resp, err := daemon.AskViaDaemon(daemon.SocketPath(), attempt)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		if resp.Status == protocol.StatusError {
+			fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
+			os.Exit(1)
+		}
+		if len(resp.Plan) == 0 {
+			fmt.Println("no match — the model found nothing it could do for that request")
+			if resp.Reasoning != "" {
+				fmt.Printf("  reasoning: %s\n", resp.Reasoning)
+			}
+			return
+		}
+
+		step := resp.Plan[0]
+		fmt.Printf("understood: %s %s\n", step.Cap, formatArgs(core.Args(step.Args)))
 		if resp.Reasoning != "" {
 			fmt.Printf("  reasoning: %s\n", resp.Reasoning)
 		}
+
+		run, err := daemon.RunViaDaemon(daemon.SocketPath(), step.Cap, step.Args, func(reason string) bool {
+			return promptYes(reason + " — proceed?")
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		if run.Status == protocol.StatusError && run.Retryable && i < maxInterpretAttempts {
+			fmt.Fprintf(os.Stderr, "arguments rejected: %s — asking the model to correct\n", run.Error)
+			attempt = correctiveRequest(request, fmt.Errorf("%s", run.Error))
+			continue
+		}
+		reportRun(run)
 		return
 	}
-
-	step := resp.Plan[0]
-	fmt.Printf("understood: %s %s\n", step.Cap, formatArgs(core.Args(step.Args)))
-	if resp.Reasoning != "" {
-		fmt.Printf("  reasoning: %s\n", resp.Reasoning)
-	}
-
-	run, err := daemon.RunViaDaemon(daemon.SocketPath(), step.Cap, step.Args, func(reason string) bool {
-		return promptYes(reason + " — proceed?")
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
-	}
-	reportRun(run)
 }
 
 // ctlPlan has the daemon reason a multi-step plan (already validated and bound to
 // the policy). With execute=false ("ctl plan") it previews only; with
 // execute=true ("ctl do") it refuses a plan that has a denied step, confirms the
 // whole plan once, then runs each step through the daemon — reusing the per-step
-// confirm flow, with the daemon re-checking each step for TOCTOU.
-func ctlPlan(rest []string, execute bool) {
+// confirm flow, with the daemon re-checking each step for TOCTOU. A non-nil
+// speaker voices the summary and the outcome (the voice frontend passes one).
+func ctlPlan(rest []string, execute bool, speaker *tts.Client) {
 	request := strings.TrimSpace(strings.Join(rest, " "))
 	if request == "" {
 		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl plan|do \"<what you want>\"")
@@ -879,11 +939,13 @@ func ctlPlan(rest []string, execute bool) {
 	}
 	if len(resp.Plan) == 0 {
 		fmt.Println("no plan — the model found nothing it could do for that request")
+		say(speaker, "I found nothing I can do for that.")
 		return
 	}
 
 	if resp.Summary != "" {
 		fmt.Printf("plan: %s\n", resp.Summary)
+		say(speaker, resp.Summary)
 	}
 	var blockers []string
 	for i, s := range resp.Plan {
@@ -898,6 +960,7 @@ func ctlPlan(rest []string, execute bool) {
 		for _, b := range blockers {
 			fmt.Fprintf(os.Stderr, "  - %s\n", b)
 		}
+		say(speaker, "That is not permitted.")
 		os.Exit(1)
 	}
 
@@ -924,18 +987,22 @@ func ctlPlan(rest []string, execute bool) {
 			fmt.Printf("  [%d/%d] %s\n", i+1, n, run.Text)
 		case protocol.StatusDenied:
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): no longer permitted (state changed since preview)\n", i+1, n, s.Cap)
+			say(speaker, "I had to stop.")
 			os.Exit(1)
 		case protocol.StatusNeedsConfirm:
 			// The plan was approved as a whole, yet the daemon now wants a
 			// confirmation: a doom-loop tripped mid-plan. Stop rather than hammer.
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Text)
+			say(speaker, "I had to stop.")
 			os.Exit(1)
 		default:
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Error)
+			say(speaker, "I had to stop.")
 			os.Exit(1)
 		}
 	}
 	fmt.Println("plan done")
+	say(speaker, "Done.")
 }
 
 // reportRun prints the outcome of a single daemon run and exits nonzero on a
