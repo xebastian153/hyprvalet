@@ -29,15 +29,21 @@ func omarchyCmd(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
-// launch runs one of Omarchy's launcher scripts. They detach the launched app
-// into its own scope (via uwsm), so the daemon never adopts a browser as a
-// child for life.
-func launch(ctx context.Context, bin string, args ...string) (string, error) {
-	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
-	if err != nil {
-		return "", fmt.Errorf("%s: %w: %s", bin, err, strings.TrimSpace(string(out)))
+// launch fires an Omarchy launcher script and returns at once. A launcher like
+// omarchy-launch-browser does not return until the app it started exits, so
+// waiting on it would freeze the turn for the whole life of the browser — and
+// the daemon's execution timeout would then kill the very app it just opened.
+// Launching is fire-and-forget: the process is detached from the request's
+// context (it must outlive the turn) and reaped in the background so it leaves
+// no zombie. Only a failure to START is reported; the app's own fate is its own.
+func launch(bin string, args ...string) (string, error) {
+	cmd := exec.Command(bin, args...) // NOT CommandContext: the app outlives the request
+	cmd.Stdout, cmd.Stderr = nil, nil
+	if err := cmd.Start(); err != nil {
+		return "", fmt.Errorf("%s: %w", bin, err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	go func() { _ = cmd.Wait() }() // reap when the launcher eventually exits
+	return "", nil
 }
 
 // openBrowser opens (or focuses) the user's default browser. The command is
@@ -51,7 +57,7 @@ func (openBrowser) Access() core.AccessKind { return core.AccessApp }
 func (openBrowser) Risk() core.Risk         { return core.RiskSafe }
 func (openBrowser) Params() []string        { return nil }
 func (openBrowser) Run(ctx context.Context, _ core.Args) (string, error) {
-	if out, err := launch(ctx, "omarchy-launch-browser"); err != nil {
+	if out, err := launch("omarchy-launch-browser"); err != nil {
 		return out, err
 	}
 	return "opened the browser", nil
@@ -217,7 +223,7 @@ func (openMusic) Access() core.AccessKind { return core.AccessApp }
 func (openMusic) Risk() core.Risk         { return core.RiskSafe }
 func (openMusic) Params() []string        { return nil }
 func (openMusic) Run(ctx context.Context, _ core.Args) (string, error) {
-	if out, err := launch(ctx, "omarchy-launch-or-focus", "spotify"); err != nil {
+	if out, err := launch("omarchy-launch-or-focus", "spotify"); err != nil {
 		return out, err
 	}
 	return "opened the music player", nil
