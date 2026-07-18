@@ -541,10 +541,15 @@ func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
 	fmt.Printf("recipe %q done\n", r.Name)
 }
 
-// maxInterpretAttempts bounds the corrective loop: the first try plus one
-// retry fed with the validation error. A model that cannot correct itself with
-// explicit feedback will not improve by hammering; the error goes to the human.
-const maxInterpretAttempts = 2
+// maxInterpretAttempts bounds the corrective loop: the first try, one retry fed
+// with the validation error, and a final attempt escalated to the stronger
+// model (the HYBRID design's second tier). A model that cannot correct itself
+// with explicit feedback will not improve by hammering; past the escalation,
+// the error goes to the human.
+const maxInterpretAttempts = 3
+
+// escalated reports whether attempt i is the escalation tier — the last one.
+func escalated(i int) bool { return i == maxInterpretAttempts }
 
 // correctiveRequest re-poses the user's request together with the failure the
 // previous attempt earned, so the model corrects a concrete mistake instead of
@@ -568,9 +573,15 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 	attempt := request
 	for i := 1; ; i++ {
 		// The model may choose from every capability; the allowlist and the
-		// gate, not the prompt, are what keep a wrong choice safe.
+		// gate, not the prompt, are what keep a wrong choice safe. The final
+		// attempt escalates to the stronger model.
+		llm := ollama.Default()
+		if escalated(i) {
+			fmt.Fprintln(os.Stderr, "escalating to the stronger model")
+			llm = ollama.Strong()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		intent, err := ollama.Default().Interpret(ctx, attempt, reg.List(), recentEvents())
+		intent, err := llm.Interpret(ctx, attempt, reg.List(), recentEvents())
 		cancel()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "reasoning failed: %v\n", err)
@@ -736,9 +747,10 @@ func daemonCmd(reg *core.Registry, rules core.PolicyRules) {
 		ln.Close()
 	}()
 
-	// One Ollama client serves both reasoning ports (LLMPort + PlannerPort).
+	// One Ollama client serves both reasoning ports (LLMPort + PlannerPort);
+	// a second, stronger client is the escalation tier for corrective retries.
 	llm := ollama.Default()
-	d := daemon.New(reg, rules, llm, llm, events, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
+	d := daemon.New(reg, rules, llm, llm, ollama.Strong(), events, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
 	if err := d.Run(ctx, ln); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
 		os.Exit(1)
@@ -876,7 +888,10 @@ func ctlAsk(rest []string) {
 
 	attempt := request
 	for i := 1; ; i++ {
-		resp, err := daemon.AskViaDaemon(daemon.SocketPath(), attempt)
+		if escalated(i) {
+			fmt.Fprintln(os.Stderr, "escalating to the stronger model")
+		}
+		resp, err := daemon.AskViaDaemon(daemon.SocketPath(), attempt, escalated(i))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)

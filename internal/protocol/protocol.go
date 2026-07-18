@@ -39,6 +39,11 @@ type Request struct {
 	Approved bool `json:"approved,omitempty"`
 	// Text is the natural-language request for OpAsk / OpPlan.
 	Text string `json:"text,omitempty"`
+	// Escalate asks the daemon to reason with its stronger model. A client sets
+	// it on the final corrective attempt, after the default model failed to fix
+	// its own mistake. Escalation changes only reasoning depth — the resulting
+	// intent walks exactly the same allowlist, policy gate, and validation.
+	Escalate bool `json:"escalate,omitempty"`
 }
 
 // Status is the outcome class of a response, so a client can branch without

@@ -263,7 +263,7 @@ func TestReasonAskBindsSingleIntent(t *testing.T) {
 	d.llm = fakeLLM{intent: core.Intent{Capability: "a.b", Args: core.Args{"x": "1"}, Reasoning: "because"}}
 	socket := runDaemon(t, d)
 
-	resp, err := AskViaDaemon(socket, "do the thing")
+	resp, err := AskViaDaemon(socket, "do the thing", false)
 	if err != nil {
 		t.Fatalf("AskViaDaemon: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestReasonAskNoMatch(t *testing.T) {
 	d.llm = fakeLLM{intent: core.Intent{Capability: "not.registered", Reasoning: "guessing"}}
 	socket := runDaemon(t, d)
 
-	resp, err := AskViaDaemon(socket, "do something impossible")
+	resp, err := AskViaDaemon(socket, "do something impossible", false)
 	if err != nil {
 		t.Fatalf("AskViaDaemon: %v", err)
 	}
@@ -386,6 +386,36 @@ func TestHandleRunPersistsHistory(t *testing.T) {
 	}
 	if len(saved) != 1 || saved[0].Signature != core.ActionSignature("a.b", nil) {
 		t.Fatalf("persisted history = %+v", saved)
+	}
+}
+
+func TestReasonAskEscalatesToStrongModel(t *testing.T) {
+	allow := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAllow}}}
+	d := testDaemon(t, allow, demoCap{id: "a.b"})
+	d.llm = fakeLLM{intent: core.Intent{Capability: "a.b", Reasoning: "small"}}
+	d.llmStrong = fakeLLM{intent: core.Intent{Capability: "a.b", Reasoning: "strong"}}
+	socket := runDaemon(t, d)
+
+	resp, err := AskViaDaemon(socket, "do it", false)
+	if err != nil || resp.Reasoning != "small" {
+		t.Fatalf("default ask = %+v err=%v, want the small model", resp, err)
+	}
+	resp, err = AskViaDaemon(socket, "do it", true)
+	if err != nil || resp.Reasoning != "strong" {
+		t.Fatalf("escalated ask = %+v err=%v, want the strong model", resp, err)
+	}
+}
+
+func TestReasonAskEscalateWithoutStrongFallsBack(t *testing.T) {
+	// A daemon with no escalation tier must still answer with its default
+	// model, not fail: escalation is a depth upgrade, never a requirement.
+	d := testDaemon(t, core.PolicyRules{}, demoCap{id: "a.b"})
+	d.llm = fakeLLM{intent: core.Intent{Capability: "a.b", Reasoning: "small"}}
+	socket := runDaemon(t, d)
+
+	resp, err := AskViaDaemon(socket, "do it", true)
+	if err != nil || resp.Reasoning != "small" {
+		t.Fatalf("escalate without strong = %+v err=%v, want fallback to default", resp, err)
 	}
 }
 

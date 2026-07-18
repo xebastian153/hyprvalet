@@ -51,6 +51,17 @@ func Default() *Client {
 	)
 }
 
+// Strong builds the escalation client: the larger model the corrective loop
+// falls back to when the default model cannot fix its own mistake. Override
+// with HYPRVALET_MODEL_STRONG. Same server, different depth — the HYBRID
+// design's second tier.
+func Strong() *Client {
+	return New(
+		envOr("HYPRVALET_OLLAMA_URL", "http://localhost:11434"),
+		envOr("HYPRVALET_MODEL_STRONG", "qwen2.5:7b"),
+	)
+}
+
 func envOr(key, fallback string) string {
 	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
 		return v

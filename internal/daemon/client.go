@@ -30,8 +30,10 @@ func RunViaDaemon(socketPath, cap string, args map[string]string, confirm func(r
 // AskViaDaemon has the daemon reason a single intent from a natural-language
 // request and return it unexecuted (a one-step, policy-bound plan). Execution is
 // the caller's job — a separate OpRun through RunViaDaemon's confirm flow.
-func AskViaDaemon(socketPath, request string) (protocol.Response, error) {
-	return Send(socketPath, protocol.Request{Op: protocol.OpAsk, Text: request})
+// escalate asks for the daemon's stronger model — set on the final corrective
+// attempt, after the default model failed to fix its own mistake.
+func AskViaDaemon(socketPath, request string, escalate bool) (protocol.Response, error) {
+	return Send(socketPath, protocol.Request{Op: protocol.OpAsk, Text: request, Escalate: escalate})
 }
 
 // PlanViaDaemon has the daemon reason an ordered, validated, policy-bound plan

@@ -60,10 +60,14 @@ type Daemon struct {
 	rules   core.PolicyRules
 	planner core.PlannerPort // multi-step reasoning (ask/plan); read-only after New
 	llm     core.LLMPort     // single-intent reasoning (ask); read-only after New
-	events  core.EventStore  // audit log; may be nil (no auditing)
-	arm     core.ArmState
-	session core.SessionAllow
-	history []core.ActionRecord
+	// llmStrong is the escalation tier: the larger model used when a client
+	// reports the default one failed to correct its own mistake. May be nil
+	// (no escalation available). Read-only after New.
+	llmStrong core.LLMPort
+	events    core.EventStore // audit log; may be nil (no auditing)
+	arm       core.ArmState
+	session   core.SessionAllow
+	history   []core.ActionRecord
 	// historyPath is where executed actions are persisted so the one-shot CLI
 	// shares the daemon's recent-action world; empty means in-memory only.
 	historyPath string
@@ -75,7 +79,7 @@ type Daemon struct {
 // it inherits the current arming and session grants. The reasoning ports (LLM
 // and planner) and the audit store are injected so the core stays behind its
 // interfaces; production passes one Ollama client for both reasoning ports.
-func New(reg *core.Registry, rules core.PolicyRules, planner core.PlannerPort, llm core.LLMPort, events core.EventStore, logger *log.Logger) *Daemon {
+func New(reg *core.Registry, rules core.PolicyRules, planner core.PlannerPort, llm, llmStrong core.LLMPort, events core.EventStore, logger *log.Logger) *Daemon {
 	now := time.Now()
 	arm, _ := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
 	session, _ := policyfile.LoadSessionAllow(policyfile.SessionAllowPath())
@@ -86,6 +90,7 @@ func New(reg *core.Registry, rules core.PolicyRules, planner core.PlannerPort, l
 		rules:       rules,
 		planner:     planner,
 		llm:         llm,
+		llmStrong:   llmStrong,
 		events:      events,
 		arm:         arm,
 		session:     session,
@@ -294,8 +299,13 @@ func (d *Daemon) reasonAsk(req protocol.Request) protocol.Response {
 	if request == "" {
 		return protocol.Response{Status: protocol.StatusError, Error: "empty request"}
 	}
+	llm := d.llm
+	if req.Escalate && d.llmStrong != nil {
+		llm = d.llmStrong
+		d.log.Printf("escalating %q to the stronger model", request)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	intent, err := d.llm.Interpret(ctx, request, d.reg.List(), d.recent())
+	intent, err := llm.Interpret(ctx, request, d.reg.List(), d.recent())
 	cancel()
 	if err != nil {
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("reasoning failed: %v", err)}
