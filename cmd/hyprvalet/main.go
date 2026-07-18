@@ -40,6 +40,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/project"
+	"github.com/xebastian153/hyprvalet/internal/adapters/prompt"
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/remind"
 	"github.com/xebastian153/hyprvalet/internal/adapters/speech"
@@ -100,6 +101,36 @@ func strongReasoner() core.LLMPort {
 	return ollama.Strong()
 }
 
+// conversant is a reasoner that can hold a raw JSON conversation — the project-
+// planning flow is a dialogue, not a typed capability call, so it needs this
+// beyond the LLMPort/PlannerPort ports.
+type conversant interface {
+	Chat(ctx context.Context, system, user string) (string, error)
+}
+
+// planningReasoner reasons the planning conversation: Groq with the local model
+// as fallback when available, local Ollama otherwise — the same composition as
+// the rest of hyprvalet.
+func planningReasoner() conversant {
+	if groq.Available() {
+		return fallback.New(groq.Default(), ollama.Default())
+	}
+	return ollama.Default()
+}
+
+// spanishOutput reports whether spoken/CLI assistant text should be Spanish.
+func spanishOutput() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("HYPRVALET_LANG")), "spanish")
+}
+
+// pick returns the Spanish string when the assistant speaks Spanish, else English.
+func pick(en, es string) string {
+	if spanishOutput() {
+		return es
+	}
+	return en
+}
+
 // emitEvent records what became of one attempted capability call.
 func emitEvent(kind core.EventKind, cap string, args core.Args, detail string) {
 	e := core.Event{At: time.Now(), Source: "cli", Kind: kind, Cap: cap, Args: args, Detail: detail}
@@ -156,6 +187,8 @@ func main() {
 		planCmd(reg, rules, args[1:], false)
 	case "do":
 		planCmd(reg, rules, args[1:], true)
+	case "brainstorm":
+		brainstormCmd(args[1:])
 	case "voice":
 		voiceCmd()
 	case "listen":
@@ -983,6 +1016,23 @@ func voiceCmd() {
 			return
 		}
 
+		// A request to plan a project opens a conversation of its own — the
+		// assistant asks questions and listens for answers — so it is handled
+		// here at the loop, where the microphone is, rather than as a one-shot
+		// turn. The plain speaker is used: each question listens right after.
+		if idea, ok := planningIntent(text); ok {
+			ask := func(string) (string, bool) {
+				t, res := listenAndTranscribe(ctx, wav, false, idle)
+				if res != listenGot {
+					return "", false
+				}
+				return t, true
+			}
+			runPlanning(ctx, idea, plain, ask)
+			fmt.Println()
+			continue
+		}
+
 		processTurn(ctx, text, speaker, confirm)
 		fmt.Println()
 	}
@@ -1096,6 +1146,111 @@ func withMemory(text string) string {
 	}
 	fmt.Fprintf(&b, "User: %s", text)
 	return b.String()
+}
+
+// maxPlanningRounds bounds the planning loop defensively; the prompt also caps
+// how many questions get asked before a plan is required.
+const maxPlanningRounds = 8
+
+// planningTriggers open a project-planning conversation — the user asking to
+// think a project through together, like with a friend.
+var planningTriggers = []string{
+	"planeemos", "planifiquemos", "armemos un proyecto", "armemos el proyecto",
+	"planear un proyecto", "planificar un proyecto", "crear un proyecto",
+	"pensemos un proyecto", "diseñemos un proyecto", "quiero armar un proyecto",
+	"quiero crear un proyecto", "ayudame a planear", "ayúdame a planear",
+	"plan a project", "let's plan", "lets plan", "help me plan", "brainstorm",
+}
+
+// planningIntent reports whether an utterance opens a planning conversation, and
+// returns the idea the user gave alongside the trigger (may be empty — then the
+// assistant asks what to build).
+func planningIntent(text string) (idea string, ok bool) {
+	low := strings.ToLower(text)
+	for _, t := range planningTriggers {
+		if i := strings.Index(low, t); i >= 0 {
+			// The idea is whatever follows the trigger phrase.
+			rest := strings.TrimSpace(text[i+len(t):])
+			rest = strings.TrimLeft(rest, ":,-— ")
+			return rest, true
+		}
+	}
+	return "", false
+}
+
+// runPlanning holds a planning conversation about idea: it asks clarifying
+// questions through ask(), and once the reasoner is satisfied it saves the plan
+// to the assistant's memory and reads it back. ask() returns the user's answer
+// and false if they gave up. speaker may be nil (text-only, for the CLI).
+func runPlanning(ctx context.Context, idea string, speaker speech.Speaker, ask func(question string) (string, bool)) {
+	llm := planningReasoner()
+	var transcript strings.Builder
+	fmt.Fprintf(&transcript, "Project idea: %s\n", strings.TrimSpace(idea))
+
+	asked := 0
+	for round := 0; round < maxPlanningRounds; round++ {
+		raw, err := llm.Chat(ctx, prompt.BuildPlanning(asked), transcript.String())
+		if err != nil {
+			line := pick("Sorry, I could not think that through just now.", "Disculpe, señor, no pude pensarlo bien en este momento.")
+			say(speaker, line)
+			fmt.Fprintln(os.Stderr, "planning error:", err)
+			return
+		}
+		turn, err := prompt.ParsePlanning(raw)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "planning parse error:", err)
+			line := pick("Sorry, I lost the thread — let's try again.", "Perdí el hilo, señor — probemos de nuevo.")
+			say(speaker, line)
+			return
+		}
+		if turn.Plan != nil {
+			finishPlan(*turn.Plan, speaker)
+			return
+		}
+		fmt.Printf("jarvis: %s\n", turn.Question)
+		say(speaker, turn.Question)
+		answer, ok := ask(turn.Question)
+		if !ok {
+			say(speaker, pick("No problem — we can plan it another time.", "No hay problema, señor — lo planeamos en otro momento."))
+			return
+		}
+		asked++
+		fmt.Fprintf(&transcript, "Q: %s\nA: %s\n", turn.Question, answer)
+	}
+	say(speaker, pick("Let's pick this up again later.", "Retomemos esto más tarde, señor."))
+}
+
+// brainstormCmd runs a project-planning conversation from the terminal: the
+// assistant's questions print, answers are read from stdin. It shares the exact
+// driver the voice path uses — the only difference is where answers come from.
+func brainstormCmd(args []string) {
+	idea := strings.TrimSpace(strings.Join(args, " "))
+	reader := bufio.NewScanner(os.Stdin)
+	ask := func(string) (string, bool) {
+		fmt.Print("> ")
+		if !reader.Scan() {
+			return "", false
+		}
+		line := strings.TrimSpace(reader.Text())
+		if line == "" || line == "salir" || line == "cancel" || line == "quit" {
+			return "", false
+		}
+		return line, true
+	}
+	runPlanning(context.Background(), idea, nil, ask)
+}
+
+// finishPlan saves a completed plan to the assistant's memory and reads it back,
+// leaving the handoff to Claude Code for when the user asks.
+func finishPlan(plan prompt.ProjectPlan, speaker speech.Speaker) {
+	if err := memory.Default().Remember(plan.Note()); err != nil {
+		fmt.Fprintln(os.Stderr, "could not save plan:", err)
+	}
+	fmt.Printf("plan: %s\n", plan.Note())
+	say(speaker, plan.Summary())
+	say(speaker, pick(
+		"I've saved the plan. When you're ready, we can open it in Claude Code.",
+		"Guardé el plan, señor. Cuando quiera, lo abrimos en Claude Code."))
 }
 
 // terminalKeywords mark a request as being about the Claude terminal — the only

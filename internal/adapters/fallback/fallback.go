@@ -57,6 +57,29 @@ func (c *Client) Plan(ctx context.Context, request string, caps []core.Capabilit
 	return plan, nil
 }
 
+// chatter is a raw conversational turn — a capability some reasoners have
+// beyond the typed ports. Detected by assertion so the Reasoner interface (and
+// its test stubs) stay untouched.
+type chatter interface {
+	Chat(ctx context.Context, system, user string) (string, error)
+}
+
+// Chat tries the primary reasoner and falls back to the backup, mirroring the
+// resilience of Interpret/Plan. A backend that cannot chat is skipped.
+func (c *Client) Chat(ctx context.Context, system, user string) (string, error) {
+	if p, ok := c.primary.(chatter); ok {
+		if out, err := p.Chat(ctx, system, user); err == nil {
+			return out, nil
+		} else {
+			note(err)
+		}
+	}
+	if b, ok := c.backup.(chatter); ok {
+		return b.Chat(ctx, system, user)
+	}
+	return "", fmt.Errorf("no chat-capable reasoning backend available")
+}
+
 // note makes degradation VISIBLE: a silent fallback once turned a knowledge
 // question into a screen lock, and nobody could tell which model had answered.
 // Written to stderr so the daemon's journal and an interactive shell both see

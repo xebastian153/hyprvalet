@@ -150,6 +150,13 @@ func (c *Client) chat(ctx context.Context, system, user string) (string, error) 
 }
 
 // Interpret maps a request to one capability. It satisfies core.LLMPort.
+// Chat is a raw JSON chat turn for higher-level conversational flows (project
+// planning) that are not typed capability calls. The prompt must instruct the
+// exact JSON shape; the model answers in json_object mode.
+func (c *Client) Chat(ctx context.Context, system, user string) (string, error) {
+	return c.chat(ctx, system, user)
+}
+
 func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Intent, error) {
 	content, err := c.chat(ctx, prompt.BuildIntent(caps, recent), request)
 	if err != nil {

@@ -131,6 +131,13 @@ func (c *Client) chat(ctx context.Context, system, user string, format json.RawM
 	return cr.Message.Content, nil
 }
 
+// Chat is a raw JSON chat turn for higher-level conversational flows (project
+// planning) that are not typed capability calls. Ollama's generic JSON mode is
+// used; the prompt carries the exact shape.
+func (c *Client) Chat(ctx context.Context, system, user string) (string, error) {
+	return c.chat(ctx, system, user, json.RawMessage(`"json"`))
+}
+
 // Interpret maps a request to one capability. It satisfies core.LLMPort.
 func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Intent, error) {
 	content, err := c.chat(ctx, prompt.BuildIntent(caps, recent), request, prompt.IntentSchema)
