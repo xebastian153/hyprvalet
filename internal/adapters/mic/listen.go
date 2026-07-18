@@ -23,9 +23,12 @@ const (
 	maxUtterance    = 660 // ~20s cap
 
 	// thresholdFactor scales the ambient floor into a voice threshold;
-	// thresholdMin keeps a very quiet room from triggering on anything.
+	// thresholdMin keeps a very quiet room from triggering on anything;
+	// loudAmbient is the floor above which we warn that speech may not be
+	// heard over the room.
 	thresholdFactor = 3.5
 	thresholdMin    = 260
+	loudAmbient     = 1200
 )
 
 // ListenOnce blocks until one spoken utterance is captured, then writes it as
@@ -82,6 +85,12 @@ func ListenOnce(ctx context.Context, wavPath string) error {
 	}
 	ambient /= calibrateFrames
 	threshold := math.Max(ambient*thresholdFactor, thresholdMin)
+	if ambient > loudAmbient {
+		// A loud room (music playing) raises the threshold so far that speech
+		// may never cross it — the assistant goes silently deaf. Deafness must
+		// at least be VISIBLE until echo cancellation lands.
+		fmt.Fprintf(os.Stderr, "warning: ambient noise is high (RMS %.0f) — I may not hear you over it\n", ambient)
+	}
 
 	det := newVAD(vadConfig{
 		triggerFrames: triggerFrames,

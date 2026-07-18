@@ -269,7 +269,13 @@ func (d *Daemon) handleRun(req protocol.Request) protocol.Response {
 		return protocol.Response{Status: protocol.StatusNeedsConfirm, Text: fmt.Sprintf("%q is repeating; needs confirmation", cap.ID())}
 	}
 
-	out, err := cap.Run(context.Background(), args)
+	// Bounded execution: this runs ON the actor goroutine, so a capability that
+	// hangs (a launcher that never detaches, a tool waiting on nothing) would
+	// deafen the entire daemon — ping included. Sixty seconds is generous for
+	// any desktop action and an eternity for a hang.
+	runCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	out, err := cap.Run(runCtx, args)
+	cancel()
 	if err != nil {
 		d.emit(core.EventFailed, cap.ID(), args, err.Error())
 		return protocol.Response{Status: protocol.StatusError, Error: err.Error(), Retryable: core.IsValidation(err)}
