@@ -72,6 +72,10 @@ func main() {
 		recipeCmd(reg, rules, args[1:])
 	case "ask":
 		askCmd(reg, rules, args[1:])
+	case "plan":
+		planCmd(reg, rules, args[1:], false)
+	case "do":
+		planCmd(reg, rules, args[1:], true)
 	case "run":
 		requireArg(args, "run", "<capability> [key=value ...]")
 		runCap(reg, rules, args[1], args[2:])
@@ -102,6 +106,8 @@ func usage() {
 	fmt.Println("  hyprvalet recipe show <name>         preview a recipe's steps")
 	fmt.Println("  hyprvalet recipe run <name>          run a recipe (each step is still gated)")
 	fmt.Println("  hyprvalet ask \"<request>\"            map natural language to one capability (local LLM)")
+	fmt.Println("  hyprvalet plan \"<request>\"           preview a multi-step plan without running it")
+	fmt.Println("  hyprvalet do \"<request>\"             plan, confirm once, then execute step by step")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -432,6 +438,96 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 	}
 }
 
+// planCmd runs the M3 planner. With execute=false ("plan") it previews only;
+// with execute=true ("do") it confirms the whole plan once and runs it.
+//
+// Plan-binding: the plan is evaluated against the policy up front. If any step
+// is blocked (denied, or needs arming) the whole plan is refused before anything
+// runs — you never execute a plan that cannot complete. One confirmation then
+// approves every step you saw in the preview.
+func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute bool) {
+	request := strings.TrimSpace(strings.Join(rest, " "))
+	if request == "" {
+		fmt.Fprintln(os.Stderr, "usage: hyprvalet plan|do \"<what you want>\"")
+		os.Exit(2)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	plan, err := ollama.Default().Plan(ctx, request, reg.List())
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "planning failed: %v\n", err)
+		fmt.Fprintln(os.Stderr, "(is ollama running? try: systemctl status ollama)")
+		os.Exit(1)
+	}
+
+	if len(plan.Steps) == 0 {
+		fmt.Println("no plan — the model found nothing it could do for that request")
+		return
+	}
+	if err := plan.Validate(reg); err != nil {
+		fmt.Fprintf(os.Stderr, "invalid plan: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Evaluate every step up front, print the preview, and collect blockers.
+	now := time.Now()
+	armState, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
+		os.Exit(1)
+	}
+
+	if plan.Summary != "" {
+		fmt.Printf("plan: %s\n", plan.Summary)
+	}
+	var blockers []string
+	for i, s := range plan.Steps {
+		cap, _ := reg.Get(s.Capability) // safe: Validate confirmed it exists
+		d := core.Evaluate(rules, armState, cap, now)
+		fmt.Printf("  %d. %s %s  [%s]\n", i+1, s.Capability, formatArgs(s.Args), d)
+		if d == core.DecisionDeny {
+			if r := rules.Resolve(cap); r.RequiresArming && !armState.IsArmed(cap.ID(), now) {
+				blockers = append(blockers, fmt.Sprintf("step %d (%s) needs arming — run 'hyprvalet arm %s'", i+1, cap.ID(), cap.ID()))
+			} else {
+				blockers = append(blockers, fmt.Sprintf("step %d (%s) is denied by policy", i+1, cap.ID()))
+			}
+		}
+	}
+
+	if len(blockers) > 0 {
+		fmt.Fprintln(os.Stderr, "this plan cannot run:")
+		for _, b := range blockers {
+			fmt.Fprintf(os.Stderr, "  - %s\n", b)
+		}
+		os.Exit(1)
+	}
+
+	if !execute {
+		return // `plan` previews only
+	}
+
+	if !promptYes(fmt.Sprintf("execute this %d-step plan?", len(plan.Steps))) {
+		fmt.Println("aborted")
+		return
+	}
+
+	n := len(plan.Steps)
+	for i, s := range plan.Steps {
+		cap, _ := reg.Get(s.Capability)
+		out, err := cap.Run(context.Background(), s.Args)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "plan failed at step %d/%d (%s): %v\n", i+1, n, s.Capability, err)
+			os.Exit(1)
+		}
+		if out == "" {
+			out = s.Capability + " ok"
+		}
+		fmt.Printf("  [%d/%d] %s\n", i+1, n, out)
+	}
+	fmt.Println("plan done")
+}
+
 func parseArgs(rest []string) (core.Args, error) {
 	args := core.Args{}
 	for _, kv := range rest {
@@ -447,7 +543,13 @@ func parseArgs(rest []string) (core.Args, error) {
 func confirm(cap core.Capability, args core.Args) bool {
 	fmt.Printf("About to run %s (%s, risk=%s) with %v\n",
 		cap.ID(), cap.Access(), cap.Risk(), map[string]string(args))
-	fmt.Print("Proceed? [y/N] ")
+	return promptYes("Proceed?")
+}
+
+// promptYes asks a yes/no question, defaulting to no. Non-TTY stdin (EOF) reads
+// as no, so the tool fails closed when it cannot ask.
+func promptYes(question string) bool {
+	fmt.Print(question + " [y/N] ")
 	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
 	line = strings.ToLower(strings.TrimSpace(line))
 	return line == "y" || line == "yes"
