@@ -7,7 +7,24 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
-var _ core.Capability = readTerminal{}
+var (
+	_ core.Capability = readTerminal{}
+	_ core.Capability = sendTerminal{}
+)
+
+func TestSendIsConfirmTier(t *testing.T) {
+	// Relaying words into Claude's terminal must never be Safe — it always
+	// asks first.
+	if (sendTerminal{}).Risk() != core.RiskConfirm {
+		t.Fatal("terminal.send must be Confirm-tier — it types on the user's behalf")
+	}
+}
+
+func TestSendRejectsEmpty(t *testing.T) {
+	if _, err := (sendTerminal{}).Run(nil, core.Args{}); !core.IsValidation(err) {
+		t.Fatalf("empty send must be a ValidationError, got %v", err)
+	}
+}
 
 func TestCleanCapture(t *testing.T) {
 	raw := strings.Join([]string{

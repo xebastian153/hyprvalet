@@ -17,7 +17,7 @@ import (
 
 // Capabilities returns every terminal capability.
 func Capabilities() []core.Capability {
-	return []core.Capability{readTerminal{}}
+	return []core.Capability{readTerminal{}, sendTerminal{}}
 }
 
 // readLines is how many meaningful (non-decoration) lines of the terminal tail
@@ -61,6 +61,42 @@ func Capture(ctx context.Context, n int) (string, error) {
 		return "", fmt.Errorf("reading the terminal: %w", err)
 	}
 	return cleanCapture(string(out), n), nil
+}
+
+// sendTerminal types a line into the Claude Code terminal — the assistant
+// relaying your words to Claude. This is the most powerful capability: whatever
+// is typed goes to whatever occupies that pane (usually Claude, which has its
+// own confirmations; a bare shell would run it). So it is Confirm-tier — you
+// approve each message before it is sent — and the assistant relays, it never
+// answers Claude on its own. The message is passed to tmux as a literal
+// argument, never through a shell.
+type sendTerminal struct{}
+
+func (sendTerminal) ID() string { return "terminal.send" }
+func (sendTerminal) Description() string {
+	return "Type a message into the Claude Code terminal (relay your words to Claude)"
+}
+func (sendTerminal) Access() core.AccessKind { return core.AccessCommand }
+func (sendTerminal) Risk() core.Risk         { return core.RiskConfirm }
+func (sendTerminal) Params() []string        { return []string{"text"} }
+func (sendTerminal) Run(ctx context.Context, args core.Args) (string, error) {
+	text := strings.TrimSpace(args["text"])
+	if text == "" {
+		return "", core.Validationf("missing required arg %q (what to type into the terminal)", "text")
+	}
+	session, err := activeSession(ctx)
+	if err != nil {
+		return "", err
+	}
+	// Send the text literally (-l, so no character is read as a key name),
+	// then a separate Enter to submit it.
+	if err := exec.CommandContext(ctx, "tmux", "send-keys", "-t", session, "-l", "--", text).Run(); err != nil {
+		return "", fmt.Errorf("typing into the terminal: %w", err)
+	}
+	if err := exec.CommandContext(ctx, "tmux", "send-keys", "-t", session, "Enter").Run(); err != nil {
+		return "", fmt.Errorf("submitting to the terminal: %w", err)
+	}
+	return fmt.Sprintf("sent to Claude: %q", text), nil
 }
 
 // activeSession finds the most-recently-active hyprvalet tmux session — the
