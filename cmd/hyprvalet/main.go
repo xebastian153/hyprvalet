@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -23,10 +24,12 @@ import (
 
 	"github.com/xebastian153/hyprvalet/internal/adapters/eventlog"
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
+	"github.com/xebastian153/hyprvalet/internal/adapters/mic"
 	"github.com/xebastian153/hyprvalet/internal/adapters/ollama"
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
+	"github.com/xebastian153/hyprvalet/internal/adapters/whisper"
 	"github.com/xebastian153/hyprvalet/internal/core"
 	"github.com/xebastian153/hyprvalet/internal/daemon"
 	"github.com/xebastian153/hyprvalet/internal/protocol"
@@ -107,6 +110,8 @@ func main() {
 		planCmd(reg, rules, args[1:], false)
 	case "do":
 		planCmd(reg, rules, args[1:], true)
+	case "voice":
+		voiceCmd()
 	case "daemon":
 		daemonCmd(reg, rules)
 	case "ping":
@@ -152,6 +157,7 @@ func usage() {
 	fmt.Println("  hyprvalet ctl ask \"<request>\"        reason one capability in the daemon, then run it")
 	fmt.Println("  hyprvalet ctl plan \"<request>\"       preview a daemon-reasoned plan (nothing runs)")
 	fmt.Println("  hyprvalet ctl do \"<request>\"         reason, confirm once, then run the plan via the daemon")
+	fmt.Println("  hyprvalet voice                      speak a request (records until Enter, runs via daemon)")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -208,6 +214,11 @@ func runCap(reg *core.Registry, rules core.PolicyRules, id string, rest []string
 	}
 	fmt.Println(out)
 }
+
+// stepPause is the breather between consecutive plan/recipe steps. Back-to-back
+// desktop mutations (two workspace switches) execute faster than the eye can
+// follow; a short pause makes each step visible without feeling sluggish.
+const stepPause = 600 * time.Millisecond
 
 // gateResult is the outcome of evaluating the permission policy for one call.
 type gateResult int
@@ -505,6 +516,9 @@ func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
 
 	n := len(r.Steps)
 	for i, s := range r.Steps {
+		if i > 0 {
+			time.Sleep(stepPause)
+		}
 		// Validated at load, so Get always succeeds; the check is defensive.
 		cap, ok := reg.Get(s.Capability)
 		if !ok {
@@ -647,6 +661,9 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 
 	n := len(plan.Steps)
 	for i, s := range plan.Steps {
+		if i > 0 {
+			time.Sleep(stepPause)
+		}
 		cap, _ := reg.Get(s.Capability)
 		// Plan-binding re-validation (TOCTOU): the plan was approved as a whole,
 		// but re-check each step against the policy the instant before it runs.
@@ -692,6 +709,42 @@ func daemonCmd(reg *core.Registry, rules core.PolicyRules) {
 		fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
 		os.Exit(1)
 	}
+}
+
+// voiceCmd is the voice frontend: record until Enter, transcribe locally, then
+// hand the text to the exact flow a typed `ctl do` uses — daemon reasoning,
+// plan preview, one confirmation, gated execution. Voice is only an input
+// method; it earns no shortcut through the permission model.
+func voiceCmd() {
+	wav := filepath.Join(os.TempDir(), fmt.Sprintf("hyprvalet-voice-%d.wav", os.Getpid()))
+	defer os.Remove(wav)
+
+	stop, err := mic.Start(wav)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("listening — speak your request, then press Enter")
+	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
+	if err := stop(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	text, err := whisper.Default().Transcribe(ctx, wav)
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+	if text == "" {
+		fmt.Println("heard nothing — try again closer to the microphone")
+		return
+	}
+	fmt.Printf("heard: %s\n", text)
+
+	ctlPlan([]string{text}, true)
 }
 
 // logCmd shows the audit trail: the most recent attempted actions and what
@@ -858,6 +911,9 @@ func ctlPlan(rest []string, execute bool) {
 
 	n := len(resp.Plan)
 	for i, s := range resp.Plan {
+		if i > 0 {
+			time.Sleep(stepPause)
+		}
 		run, err := daemon.RunStep(daemon.SocketPath(), s.Cap, s.Args)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %v\n", i+1, n, s.Cap, err)
