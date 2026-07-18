@@ -148,7 +148,8 @@ func runCap(reg *core.Registry, rules core.PolicyRules, id string, rest []string
 		os.Exit(2)
 	}
 
-	switch gate(cap, args, loadDecisionCtx(rules)) {
+	dc := loadDecisionCtx(rules)
+	switch gate(cap, args, &dc) {
 	case gateDenied:
 		os.Exit(1)
 	case gateDeclined:
@@ -175,15 +176,25 @@ const (
 	gateDeclined                   // policy asked and the human said no
 )
 
+// A degenerate loop is the same action firing over and over; after this many
+// identical calls within this window, the gate forces a confirmation.
+const (
+	doomLoopThreshold = 3
+	doomLoopWindow    = 30 * time.Second
+)
+
 // decisionCtx bundles everything a permission decision needs at one instant: the
-// policy, the current arming and session grants, and where to persist a new
-// session grant. It is built once per command and shared by every gated call in
-// it, so all of a command's decisions see the same world.
+// policy, the current arming and session grants, the recent-action history, and
+// where to persist new grants and records. It is built once per command and
+// shared by every gated call in it (by pointer), so all of a command's decisions
+// see the same world and each recorded action is visible to the next.
 type decisionCtx struct {
 	rules       core.PolicyRules
 	arm         core.ArmState
 	session     core.SessionAllow
 	sessionPath string
+	history     []core.ActionRecord
+	historyPath string
 	now         time.Time
 }
 
@@ -200,7 +211,30 @@ func loadDecisionCtx(rules core.PolicyRules) decisionCtx {
 		fmt.Fprintf(os.Stderr, "error reading session grants: %v\n", err)
 		os.Exit(1)
 	}
-	return decisionCtx{rules: rules, arm: arm, session: session, sessionPath: sessionPath, now: now}
+	historyPath := policyfile.ActionLogPath()
+	history, err := policyfile.LoadActionLog(historyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading action log: %v\n", err)
+		os.Exit(1)
+	}
+	return decisionCtx{
+		rules:       rules,
+		arm:         arm,
+		session:     session,
+		sessionPath: sessionPath,
+		history:     core.PruneActions(history, now, doomLoopWindow),
+		historyPath: historyPath,
+		now:         now,
+	}
+}
+
+// recordAction appends this execution to the history (in memory and on disk) so
+// later gated calls — in this command and later invocations — can see the loop.
+func (dc *decisionCtx) recordAction(sig string) {
+	dc.history = append(dc.history, core.ActionRecord{Signature: sig, At: dc.now})
+	if err := policyfile.SaveActionLog(dc.historyPath, dc.history); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not record action: %v\n", err)
+	}
 }
 
 // gate evaluates the policy (with session grants) for one capability call and
@@ -208,7 +242,7 @@ func loadDecisionCtx(rules core.PolicyRules) decisionCtx {
 // what a denied or declined outcome means for its flow. Shared so recipes,
 // plans, and hand-typed calls gate identically — never a permission bypass. An
 // "always" answer records a session grant so the same action stops prompting.
-func gate(cap core.Capability, args core.Args, dc decisionCtx) gateResult {
+func gate(cap core.Capability, args core.Args, dc *decisionCtx) gateResult {
 	switch core.Decide(dc.rules, dc.arm, dc.session, cap, dc.now) {
 	case core.DecisionDeny:
 		if r := dc.rules.Resolve(cap); r.RequiresArming && !dc.arm.IsArmed(cap.ID(), dc.now) {
@@ -226,15 +260,26 @@ func gate(cap core.Capability, args core.Args, dc decisionCtx) gateResult {
 			if err := policyfile.SaveSessionAllow(dc.sessionPath, dc.session); err != nil {
 				fmt.Fprintf(os.Stderr, "warning: could not persist session grant: %v\n", err)
 			}
-			return gateProceed
 		case answerOnce:
-			return gateProceed
+			// proceed
 		default:
 			return gateDeclined
 		}
-	default:
-		return gateProceed
 	}
+
+	// The action is permitted (by policy or approval). Before running it, cut a
+	// degenerate loop: the same call firing over and over gets one forced
+	// confirmation regardless of policy. Then record it for future checks.
+	sig := core.ActionSignature(cap.ID(), args)
+	if core.IsDoomLoop(dc.history, sig, dc.now, doomLoopWindow, doomLoopThreshold) {
+		fmt.Fprintf(os.Stderr, "warning: %q is repeating — %d+ identical calls (this one included) in the last %s\n",
+			cap.ID(), doomLoopThreshold, doomLoopWindow)
+		if !promptYes("run it again anyway?") {
+			return gateDeclined
+		}
+	}
+	dc.recordAction(sig)
+	return gateProceed
 }
 
 type decisionAnswer int
@@ -412,7 +457,7 @@ func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
 			fmt.Fprintf(os.Stderr, "recipe %q step %d/%d: unknown capability %q\n", r.Name, i+1, n, s.Capability)
 			os.Exit(1)
 		}
-		switch gate(cap, s.Args, dc) {
+		switch gate(cap, s.Args, &dc) {
 		case gateDenied, gateDeclined:
 			fmt.Fprintf(os.Stderr, "recipe %q aborted at step %d/%d (%s)\n", r.Name, i+1, n, s.Capability)
 			os.Exit(1)
@@ -463,7 +508,8 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 		fmt.Printf("  reasoning: %s\n", intent.Reasoning)
 	}
 
-	switch gate(cap, intent.Args, loadDecisionCtx(rules)) {
+	dc := loadDecisionCtx(rules)
+	switch gate(cap, intent.Args, &dc) {
 	case gateDenied:
 		os.Exit(1)
 	case gateDeclined:
