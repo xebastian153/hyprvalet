@@ -77,7 +77,12 @@ func (c *Client) Speak(ctx context.Context, text string) error {
 		return fmt.Errorf("speech synthesis failed: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
 
-	if err := exec.CommandContext(ctx, c.play, wav).Run(); err != nil {
+	playArgs := []string{}
+	if t := strings.TrimSpace(os.Getenv("HYPRVALET_PLAY_TARGET")); t != "" {
+		playArgs = append(playArgs, "--target", t)
+	}
+	playArgs = append(playArgs, wav)
+	if err := exec.CommandContext(ctx, c.play, playArgs...).Run(); err != nil {
 		return fmt.Errorf("playback failed: %w", err)
 	}
 	return nil

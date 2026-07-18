@@ -112,8 +112,19 @@ func (c *Client) Speak(ctx context.Context, text string) error {
 	}
 	f.Close()
 
-	if err := exec.CommandContext(ctx, c.play, "--really-quiet", audio).Run(); err != nil {
+	if err := exec.CommandContext(ctx, c.play, mpvArgs(audio)...).Run(); err != nil {
 		return fmt.Errorf("playback failed: %w", err)
 	}
 	return nil
+}
+
+// mpvArgs builds the mpv argument vector, routing playback to the echo-cancel
+// sink when HYPRVALET_PLAY_TARGET is set so the assistant's own voice becomes
+// the cancellation reference (and is not heard back by the microphone).
+func mpvArgs(file string) []string {
+	args := []string{"--really-quiet"}
+	if t := strings.TrimSpace(os.Getenv("HYPRVALET_PLAY_TARGET")); t != "" {
+		args = append(args, "--audio-device=pipewire/"+t)
+	}
+	return append(args, file)
 }

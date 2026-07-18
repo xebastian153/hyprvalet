@@ -58,7 +58,12 @@ func (c *Client) Speak(ctx context.Context, text string) error {
 		}
 		return fmt.Errorf("edge-tts failed: %v: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	if err := exec.CommandContext(ctx, c.play, "--really-quiet", audio).Run(); err != nil {
+	playArgs := []string{"--really-quiet"}
+	if t := strings.TrimSpace(os.Getenv("HYPRVALET_PLAY_TARGET")); t != "" {
+		playArgs = append(playArgs, "--audio-device=pipewire/"+t)
+	}
+	playArgs = append(playArgs, audio)
+	if err := exec.CommandContext(ctx, c.play, playArgs...).Run(); err != nil {
 		return fmt.Errorf("playback failed: %w", err)
 	}
 	return nil

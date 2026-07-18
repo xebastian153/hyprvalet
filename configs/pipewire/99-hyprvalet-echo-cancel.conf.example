@@ -1,0 +1,43 @@
+# hyprvalet echo cancellation (example) — SIDE-MOUNTED, leaves system defaults
+# alone. Copy to ~/.config/pipewire/pipewire.conf.d/ and replace the two
+# node.target names with YOUR microphone and speaker node names:
+#   pactl list sources | grep -B1 Name:   # your mic
+#   pactl list sinks   | grep -B1 Name:   # your speakers
+#
+# Creates two virtual nodes used ONLY by the assistant:
+#   hyprvalet_ec_source = your mic minus what the assistant plays (its own
+#                         voice is cancelled — the prerequisite for barge-in)
+#   hyprvalet_ec_sink   = the assistant's playback, forwarded to your speakers
+#                         and used as the cancellation reference.
+#
+# Point the assistant at them and enable interruption:
+#   HYPRVALET_MIC_TARGET=hyprvalet_ec_source
+#   HYPRVALET_PLAY_TARGET=hyprvalet_ec_sink
+#   HYPRVALET_BARGE_IN=1
+#
+# Undo: delete this file, `systemctl --user restart pipewire wireplumber`,
+# clear those env vars.
+context.modules = [
+    {   name = libpipewire-module-echo-cancel
+        args = {
+            capture.props = {
+                node.name    = "hyprvalet_ec_capture"
+                node.target  = "REPLACE_WITH_YOUR_MIC_NODE_NAME"
+                node.passive = true
+            }
+            source.props = {
+                node.name        = "hyprvalet_ec_source"
+                node.description = "Assistant microphone (echo-cancelled)"
+            }
+            sink.props = {
+                node.name        = "hyprvalet_ec_sink"
+                node.description = "Assistant output (echo reference)"
+            }
+            playback.props = {
+                node.name    = "hyprvalet_ec_playback"
+                node.target  = "REPLACE_WITH_YOUR_SPEAKER_NODE_NAME"
+                node.passive = true
+            }
+        }
+    }
+]
