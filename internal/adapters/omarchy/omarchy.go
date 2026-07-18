@@ -73,7 +73,8 @@ func (takeScreenshot) Run(ctx context.Context, _ core.Args) (string, error) {
 	return "took a screenshot", nil
 }
 
-// themeNext cycles to the next theme.
+// themeNext cycles to the next installed theme. Omarchy has no `theme next`
+// subcommand, so the ring is ours: current → list → the one after → set.
 type themeNext struct{}
 
 func (themeNext) ID() string              { return "theme.next" }
@@ -82,10 +83,43 @@ func (themeNext) Access() core.AccessKind { return core.AccessCommand }
 func (themeNext) Risk() core.Risk         { return core.RiskSafe }
 func (themeNext) Params() []string        { return nil }
 func (themeNext) Run(ctx context.Context, _ core.Args) (string, error) {
-	if _, err := omarchyCmd(ctx, "theme", "next"); err != nil {
+	current, err := omarchyCmd(ctx, "theme", "current")
+	if err != nil {
 		return "", err
 	}
-	return "switched to the next theme", nil
+	list, err := omarchyCmd(ctx, "theme", "list")
+	if err != nil {
+		return "", err
+	}
+	next := nextTheme(current, strings.Split(list, "\n"))
+	if next == "" {
+		return "", fmt.Errorf("no themes installed")
+	}
+	if _, err := omarchyCmd(ctx, "theme", "set", next); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("switched to theme %s", next), nil
+}
+
+// nextTheme picks the entry after current in the installed ring, wrapping at
+// the end; an unknown current lands on the first theme.
+func nextTheme(current string, installed []string) string {
+	var names []string
+	for _, line := range installed {
+		if name := strings.TrimSpace(line); name != "" {
+			names = append(names, name)
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	current = strings.TrimSpace(current)
+	for i, name := range names {
+		if name == current {
+			return names[(i+1)%len(names)]
+		}
+	}
+	return names[0]
 }
 
 // themeSet applies a named theme. The name is validated against the LIVE list

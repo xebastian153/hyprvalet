@@ -19,6 +19,25 @@ var (
 	_ core.Capability = lockScreen{}
 )
 
+func TestNextTheme(t *testing.T) {
+	installed := []string{"Aether", "Catppuccin", "Matte Black", ""}
+	tests := []struct{ name, current, want string }{
+		{"middle advances", "Catppuccin", "Matte Black"},
+		{"last wraps to first", "Matte Black", "Aether"},
+		{"unknown current lands on first", "Dracula", "Aether"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := nextTheme(tt.current, installed); got != tt.want {
+				t.Fatalf("nextTheme(%q) = %q, want %q", tt.current, got, tt.want)
+			}
+		})
+	}
+	if got := nextTheme("x", []string{"", " "}); got != "" {
+		t.Fatalf("empty ring must return empty, got %q", got)
+	}
+}
+
 func TestMatchTheme(t *testing.T) {
 	installed := []string{"Catppuccin", "Matte Black", "Tokyo_Night", ""}
 

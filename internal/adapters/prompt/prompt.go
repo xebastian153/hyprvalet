@@ -191,6 +191,7 @@ func BuildPlan(caps []core.Capability, recent []core.Event) string {
 	b.WriteString("Respond with only a JSON object shaped {\"summary\": \"\", \"steps\": [{\"capability\": \"\", \"args\": {}}]}.\n")
 	b.WriteString("Use as many steps as the request needs, in the order they should run, and fill each step's arguments.\n")
 	b.WriteString("Use only capability ids and argument names from the list. If the request cannot be done with these capabilities, return an empty steps array.\n")
+	b.WriteString("A greeting, thanks, or a question to you is NOT a desktop action: return an empty steps array for those — never invent a plan for small talk.\n")
 	fmt.Fprintf(&b, "Also give a one-line summary of the plan, in %s — it is spoken aloud to the user. ", SpokenLanguage())
 	b.WriteString("Each argument value is a plain string with no surrounding braces or quotes — a workspace is 3, not {3} or \"3\".\n\n")
 	b.WriteString(capabilityList(caps))
