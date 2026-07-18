@@ -1,0 +1,24 @@
+# hyprvalet daemon — systemd user service (example)
+#
+# Install:
+#   cp configs/systemd/hyprvalet.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hyprvalet
+#
+# The daemon holds arming/session state and does the LLM reasoning; thin
+# clients (ctl, voice) talk to it over a Unix socket under $XDG_RUNTIME_DIR.
+
+[Unit]
+Description=hyprvalet — typed, permission-gated desktop agent
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.local/bin/hyprvalet daemon
+Restart=on-failure
+RestartSec=2
+# Pick the local model the daemon reasons with (default: qwen2.5:7b).
+# Environment=HYPRVALET_MODEL=qwen2.5:3b
+# Environment=HYPRVALET_OLLAMA_URL=http://localhost:11434
+
+[Install]
+WantedBy=default.target
