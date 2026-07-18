@@ -13,9 +13,12 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
+	"os/signal"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
@@ -24,6 +27,8 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
 	"github.com/xebastian153/hyprvalet/internal/core"
+	"github.com/xebastian153/hyprvalet/internal/daemon"
+	"github.com/xebastian153/hyprvalet/internal/protocol"
 )
 
 func buildRegistry() *core.Registry {
@@ -76,6 +81,10 @@ func main() {
 		planCmd(reg, rules, args[1:], false)
 	case "do":
 		planCmd(reg, rules, args[1:], true)
+	case "daemon":
+		daemonCmd(reg, rules)
+	case "ping":
+		pingCmd()
 	case "run":
 		requireArg(args, "run", "<capability> [key=value ...]")
 		runCap(reg, rules, args[1], args[2:])
@@ -108,6 +117,8 @@ func usage() {
 	fmt.Println("  hyprvalet ask \"<request>\"            map natural language to one capability (local LLM)")
 	fmt.Println("  hyprvalet plan \"<request>\"           preview a multi-step plan without running it")
 	fmt.Println("  hyprvalet do \"<request>\"             plan, confirm once, then execute step by step")
+	fmt.Println("  hyprvalet daemon                     run the long-lived daemon (Unix socket)")
+	fmt.Println("  hyprvalet ping                       check the daemon is alive")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -176,13 +187,6 @@ const (
 	gateDeclined                   // policy asked and the human said no
 )
 
-// A degenerate loop is the same action firing over and over; after this many
-// identical calls within this window, the gate forces a confirmation.
-const (
-	doomLoopThreshold = 3
-	doomLoopWindow    = 30 * time.Second
-)
-
 // decisionCtx bundles everything a permission decision needs at one instant: the
 // policy, the current arming and session grants, the recent-action history, and
 // where to persist new grants and records. It is built once per command and
@@ -222,7 +226,7 @@ func loadDecisionCtx(rules core.PolicyRules) decisionCtx {
 		arm:         arm,
 		session:     session,
 		sessionPath: sessionPath,
-		history:     core.PruneActions(history, now, doomLoopWindow),
+		history:     core.PruneActions(history, now, core.DoomLoopWindow),
 		historyPath: historyPath,
 		now:         now,
 	}
@@ -271,9 +275,9 @@ func gate(cap core.Capability, args core.Args, dc *decisionCtx) gateResult {
 	// degenerate loop: the same call firing over and over gets one forced
 	// confirmation regardless of policy. Then record it for future checks.
 	sig := core.ActionSignature(cap.ID(), args)
-	if core.IsDoomLoop(dc.history, sig, dc.now, doomLoopWindow, doomLoopThreshold) {
+	if core.IsDoomLoop(dc.history, sig, dc.now, core.DoomLoopWindow, core.DoomLoopThreshold) {
 		fmt.Fprintf(os.Stderr, "warning: %q is repeating — %d+ identical calls (this one included) in the last %s\n",
-			cap.ID(), doomLoopThreshold, doomLoopWindow)
+			cap.ID(), core.DoomLoopThreshold, core.DoomLoopWindow)
 		if !promptYes("run it again anyway?") {
 			return gateDeclined
 		}
@@ -618,6 +622,44 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 		fmt.Printf("  [%d/%d] %s\n", i+1, n, out)
 	}
 	fmt.Println("plan done")
+}
+
+func daemonCmd(reg *core.Registry, rules core.PolicyRules) {
+	socket := daemon.SocketPath()
+	ln, err := daemon.Listen(socket)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot start daemon: %v\n", err)
+		os.Exit(1)
+	}
+	defer os.Remove(socket)
+
+	// Ctrl-C / SIGTERM cancels the context; closing the listener unblocks the
+	// accept loop so Run returns cleanly and the socket is removed.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		ln.Close()
+	}()
+
+	d := daemon.New(reg, rules, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
+	if err := d.Run(ctx, ln); err != nil {
+		fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func pingCmd() {
+	resp, err := daemon.Send(daemon.SocketPath(), protocol.Request{Op: protocol.OpPing})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	if resp.Status != protocol.StatusPong {
+		fmt.Fprintf(os.Stderr, "unexpected reply: %+v\n", resp)
+		os.Exit(1)
+	}
+	fmt.Printf("daemon alive — %d capabilities\n", resp.Count)
 }
 
 func parseArgs(rest []string) (core.Args, error) {
