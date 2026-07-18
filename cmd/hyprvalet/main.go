@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"github.com/xebastian153/hyprvalet/internal/adapters/audio"
+	"github.com/xebastian153/hyprvalet/internal/adapters/edgetts"
+	"github.com/xebastian153/hyprvalet/internal/adapters/elevenlabs"
 	"github.com/xebastian153/hyprvalet/internal/adapters/eventlog"
 	"github.com/xebastian153/hyprvalet/internal/adapters/fallback"
 	"github.com/xebastian153/hyprvalet/internal/adapters/groq"
@@ -33,6 +35,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
+	"github.com/xebastian153/hyprvalet/internal/adapters/speech"
 	"github.com/xebastian153/hyprvalet/internal/adapters/tts"
 	"github.com/xebastian153/hyprvalet/internal/adapters/whisper"
 	"github.com/xebastian153/hyprvalet/internal/core"
@@ -141,6 +144,8 @@ func main() {
 		planCmd(reg, rules, args[1:], true)
 	case "voice":
 		voiceCmd()
+	case "say":
+		sayCmd(args[1:])
 	case "daemon":
 		daemonCmd(reg, rules)
 	case "ping":
@@ -187,6 +192,7 @@ func usage() {
 	fmt.Println("  hyprvalet ctl plan \"<request>\"       preview a daemon-reasoned plan (nothing runs)")
 	fmt.Println("  hyprvalet ctl do \"<request>\"         reason, confirm once, then run the plan via the daemon")
 	fmt.Println("  hyprvalet voice                      speak a request (records until Enter, runs via daemon)")
+	fmt.Println("  hyprvalet say \"<text>\"               speak text aloud through the voice chain")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -835,7 +841,7 @@ func voiceCmd() {
 	}
 	fmt.Printf("heard: %s\n", text)
 
-	ctlPlan([]string{text}, true, tts.Default())
+	ctlPlan([]string{text}, true, speakerChain())
 }
 
 // logCmd shows the audit trail: the most recent attempted actions and what
@@ -906,6 +912,35 @@ func ctlCmd(args []string) {
 	}
 }
 
+// speakerChain composes the speech backends by quality: ElevenLabs (natural,
+// costs credits) when a key is configured, then edge-tts (free cloud neural),
+// then local piper. The voice degrades in beauty, never in availability — the
+// same resilience shape as the reasoning fallback, applied to the mouth.
+func speakerChain() speech.Speaker {
+	var speakers []speech.Speaker
+	if elevenlabs.Available() {
+		speakers = append(speakers, elevenlabs.Default())
+	}
+	speakers = append(speakers, edgetts.Default(), tts.Default())
+	return speech.NewChain(speakers...)
+}
+
+// sayCmd speaks text through the chain — a test surface for the voice and a
+// scripting hook (e.g. spoken notifications).
+func sayCmd(rest []string) {
+	text := strings.TrimSpace(strings.Join(rest, " "))
+	if text == "" {
+		fmt.Fprintln(os.Stderr, "usage: hyprvalet say \"<text>\"")
+		os.Exit(2)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := speakerChain().Speak(ctx, text); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
 // spokenPhrases are the few fixed sentences the voice frontend speaks, keyed by
 // HYPRVALET_LANG. English is the default; the language should match the
 // installed TTS voice (HYPRVALET_VOICE) — they are two halves of one choice.
@@ -937,7 +972,7 @@ func phrase(key string) string {
 
 // say speaks text when a speaker is present. Speech is an output garnish:
 // failures warn and are swallowed, never changing what the command does.
-func say(speaker *tts.Client, text string) {
+func say(speaker speech.Speaker, text string) {
 	if speaker == nil {
 		return
 	}
@@ -1015,7 +1050,7 @@ func ctlAsk(rest []string) {
 // whole plan once, then runs each step through the daemon — reusing the per-step
 // confirm flow, with the daemon re-checking each step for TOCTOU. A non-nil
 // speaker voices the summary and the outcome (the voice frontend passes one).
-func ctlPlan(rest []string, execute bool, speaker *tts.Client) {
+func ctlPlan(rest []string, execute bool, speaker speech.Speaker) {
 	request := strings.TrimSpace(strings.Join(rest, " "))
 	if request == "" {
 		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl plan|do \"<what you want>\"")
