@@ -215,6 +215,7 @@ systemd units.
 | `HYPRVALET_LANG` | spoken-output language — `English` / `Spanish` |
 | `ELEVENLABS_API_KEY` · `HYPRVALET_VOICE` | natural TTS voice — falls back to Edge, then piper |
 | `HYPRVALET_WHISPER_MODEL` · `HYPRVALET_STT_LANG` | speech recognition — whisper.cpp |
+| `HYPRVALET_WHISPER_GPU` | pin whisper to a Vulkan device (e.g. an iGPU) so it doesn't contend with the reasoning model; falls back to CPU on failure |
 | `HYPRVALET_WAKE_WORD` | wake word + comma-separated alternates |
 | `HYPRVALET_BARGE_IN` | interrupt-while-speaking — needs headphones or echo cancellation |
 | `HYPRVALET_PROJECTS_DIR` | where `project.new` scaffolds — default `~/proyectos` |

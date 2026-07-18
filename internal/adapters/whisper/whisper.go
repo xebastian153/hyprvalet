@@ -64,18 +64,50 @@ func (c *Client) Transcribe(ctx context.Context, wavPath string) (string, error)
 	if lang == "" {
 		lang = "auto"
 	}
-	cmd := exec.CommandContext(ctx, c.bin, "-m", c.model, "-f", wavPath, "-nt", "-l", lang)
+
+	// GPU first, then CPU — resilient by composition, like the rest of hyprvalet.
+	// A shared GPU can be out of memory (another model holds the VRAM); rather
+	// than drop the turn, transcription retries on the CPU, which always works.
+	out, err := c.run(ctx, wavPath, lang, false)
+	if err == nil {
+		return CleanTranscript(out), nil
+	}
+	var execErr *exec.Error
+	if errors.As(err, &execErr) {
+		return "", fmt.Errorf("%s not found — install whisper.cpp (e.g. 'sudo pacman -S whisper-cpp')", c.bin)
+	}
+	fmt.Fprintf(os.Stderr, "whisper: GPU transcription failed (%v) — retrying on CPU\n", err)
+	out, cpuErr := c.run(ctx, wavPath, lang, true)
+	if cpuErr != nil {
+		return "", fmt.Errorf("transcription failed on GPU and CPU: %w", cpuErr)
+	}
+	return CleanTranscript(out), nil
+}
+
+// run executes whisper-cli once. On cpu it forces the CPU backend with -ng;
+// otherwise it may use a GPU — pinned to a specific Vulkan device by
+// HYPRVALET_WHISPER_GPU (e.g. "1" for an integrated GPU that does not contend
+// with a discrete GPU running the reasoning model).
+func (c *Client) run(ctx context.Context, wavPath, lang string, cpu bool) (string, error) {
+	args := []string{"-m", c.model, "-f", wavPath, "-nt", "-l", lang}
+	if cpu {
+		args = append(args, "-ng")
+	}
+	cmd := exec.CommandContext(ctx, c.bin, args...)
+	if gpu := strings.TrimSpace(os.Getenv("HYPRVALET_WHISPER_GPU")); gpu != "" && !cpu {
+		cmd.Env = append(os.Environ(), "GGML_VK_VISIBLE_DEVICES="+gpu)
+	}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		var execErr *exec.Error
 		if errors.As(err, &execErr) {
-			return "", fmt.Errorf("%s not found — install whisper.cpp (e.g. 'sudo pacman -S whisper-cpp')", c.bin)
+			return "", err // let the caller give the install hint
 		}
-		return "", fmt.Errorf("transcription failed: %v: %s", err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(stderr.String()))
 	}
-	return CleanTranscript(stdout.String()), nil
+	return stdout.String(), nil
 }
 
 // CleanTranscript normalizes whisper output into one request line: joins the
