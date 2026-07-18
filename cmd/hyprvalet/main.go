@@ -1030,6 +1030,20 @@ func voiceCmd() {
 			return
 		}
 
+		// A request to follow along with Claude enters the watch loop, using
+		// the most recent plan as context for the questions Claude asks.
+		if watchIntent(text) {
+			plan := lastPlan()
+			if plan == "" {
+				say(plain, pick("I don't have a plan to help Claude with yet.",
+					"Todavía no tengo un plan con el que ayudar a Claude, señor."))
+			} else {
+				watchClaude(ctx, plan, plain, confirm)
+			}
+			fmt.Println()
+			continue
+		}
+
 		// A request to plan a project opens a conversation of its own — the
 		// assistant asks questions and listens for answers — so it is handled
 		// here at the loop, where the microphone is, rather than as a one-shot
@@ -1192,6 +1206,39 @@ func planningIntent(text string) (idea string, ok bool) {
 	return "", false
 }
 
+// watchTriggers ask the assistant to follow along with Claude Code and help
+// answer its design questions.
+var watchTriggers = []string{
+	"seguí a claude", "segui a claude", "seguime a claude", "ayudá a claude",
+	"ayuda a claude", "acompañá a claude", "acompana a claude",
+	"quedate con claude", "seguí ayudando", "watch claude", "follow claude",
+	"help claude",
+}
+
+// watchIntent reports whether an utterance asks to watch and help Claude.
+func watchIntent(text string) bool {
+	low := strings.ToLower(text)
+	for _, t := range watchTriggers {
+		if strings.Contains(low, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// lastPlan returns the most recent project plan from memory, so following along
+// with Claude has the context it needs even in a fresh session. Empty if none.
+func lastPlan() string {
+	recent, _ := memory.Default().Recent(15)
+	for i := len(recent) - 1; i >= 0; i-- { // newest first
+		low := strings.ToLower(recent[i].Text)
+		if strings.Contains(low, "project plan") || strings.Contains(low, "plan del proyecto") {
+			return recent[i].Text
+		}
+	}
+	return ""
+}
+
 // runPlanning holds a planning conversation about idea: it asks clarifying
 // questions through ask(), and once the reasoner is satisfied it saves the plan
 // to the assistant's memory, reads it back, and offers to take it to Claude
@@ -1302,9 +1349,75 @@ func doHandoff(ctx context.Context, plan prompt.ProjectPlan, speaker speech.Spea
 		return
 	}
 	if runGated("terminal.send", map[string]string{"text": plan.Handoff()}, speaker, confirm) {
-		say(speaker, pick("Claude has the plan. I'll let you know how it goes.",
-			"Claude ya tiene el plan, señor. Le aviso cómo va."))
+		say(speaker, pick("Claude has the plan.", "Claude ya tiene el plan, señor."))
+		say(speaker, pick("Shall I stay and help with its questions?",
+			"¿Me quedo ayudándole con sus preguntas, señor?"))
+		if confirm("stay and help Claude?") {
+			watchClaude(ctx, plan.Handoff(), speaker, confirm)
+		}
 	}
+}
+
+// watchPolls and watchInterval bound how long and how often the assistant
+// watches Claude — long enough to be useful, not an unattended forever-loop.
+const (
+	watchPolls    = 45
+	watchInterval = 4 * time.Second
+)
+
+// watchClaude watches a Claude Code terminal and helps it along: it reads the
+// screen, and when Claude asks an open-ended DESIGN question it drafts the answer
+// from the plan and offers to relay it (gated — the user still says yes, and
+// hears the answer first). The safety line is absolute: a PERMISSION request —
+// running a command, editing files, anything with consequences — is surfaced to
+// the user and the watch STOPS; the assistant never answers it. It converses on
+// your behalf; it never consents on your behalf.
+func watchClaude(ctx context.Context, plan string, speaker speech.Speaker, confirm func(string) bool) {
+	llm := planningReasoner()
+	lastQ := ""
+	for i := 0; i < watchPolls; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(watchInterval):
+		}
+		content, err := terminal.Capture(ctx, 30)
+		if err != nil || strings.TrimSpace(content) == "" {
+			say(speaker, pick("I've lost sight of Claude's terminal.",
+				"Perdí de vista la terminal de Claude, señor."))
+			return
+		}
+		raw, err := llm.Chat(ctx, prompt.BuildWatch(plan), content)
+		if err != nil {
+			continue // a failed read is a skipped poll, never an action
+		}
+		turn := prompt.ParseWatch(raw)
+		switch turn.State {
+		case prompt.WatchDesign:
+			if turn.Question == lastQ {
+				continue // already handled this one
+			}
+			lastQ = turn.Question
+			say(speaker, pick("Claude asks: ", "Claude pregunta: ")+turn.Question)
+			// runGated reads the drafted answer back and asks to proceed — one
+			// gate, the user hears exactly what goes to Claude.
+			if !runGated("terminal.send", map[string]string{"text": turn.Answer}, speaker, confirm) {
+				say(speaker, pick("I'll leave it to you.", "Se lo dejo a usted, señor."))
+				return
+			}
+		case prompt.WatchPermission:
+			say(speaker, pick("Claude is asking permission for: ",
+				"Claude pide permiso para: ")+turn.Question+
+				pick(". That's yours to decide, in the window.",
+					". Eso lo decide usted, en la ventana."))
+			return // hand control back — never auto-answered
+		case prompt.WatchDone:
+			say(speaker, pick("Claude has finished.", "Claude terminó, señor."))
+			return
+		}
+	}
+	say(speaker, pick("I'll stop watching Claude for now.",
+		"Dejo de seguir a Claude por ahora, señor."))
 }
 
 // runGated runs one capability through the daemon's confirm flow and reports

@@ -27,3 +27,18 @@ func TestPlanningIntent(t *testing.T) {
 		}
 	}
 }
+
+func TestWatchIntent(t *testing.T) {
+	yes := []string{"seguí a claude", "ayudá a Claude con esto", "watch claude please", "acompañá a claude"}
+	no := []string{"abre el navegador", "armemos un proyecto", "qué hora es"}
+	for _, s := range yes {
+		if !watchIntent(s) {
+			t.Errorf("watchIntent(%q) = false, want true", s)
+		}
+	}
+	for _, s := range no {
+		if watchIntent(s) {
+			t.Errorf("watchIntent(%q) = true, want false", s)
+		}
+	}
+}
