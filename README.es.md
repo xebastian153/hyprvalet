@@ -161,6 +161,26 @@ sequenceDiagram
     Note over Usuario,C: Tú sigues en el bucle en cada acción.
 ```
 
+### Planear un proyecto juntos
+
+Sobre el puente, hyprvalet puede ser un socio de proyecto. Dices *"planeemos un
+proyecto"* y mantiene una conversación — te hace preguntas antes de comprometer
+nada — y luego guarda el plan en su propia memoria de largo plazo. Ofrece abrir
+el proyecto en Claude Code y pasarle el plan, y puede quedarse ayudando:
+
+- **Responde las preguntas de diseño de Claude** — las de "¿cómo lo
+  construimos?" — redactando la respuesta desde el plan para que tú la apruebes.
+- **Nunca responde los pedidos de permiso de Claude.** Correr un comando, editar
+  o borrar archivos, confiar en una carpeta — cualquier cosa con consecuencias
+  se te muestra y el asistente se detiene. Un clasificador conservador trata como
+  pedido de permiso cualquier cosa de la que no esté seguro.
+- **Cuando Claude termina, te cuenta cómo fue** — un resumen hablado de qué se
+  construyó y dónde vive, fundado en la terminal, y guardado para que puedas
+  preguntar más tarde.
+
+La misma regla atraviesa todo: conversa en tu nombre; nunca consiente en tu
+nombre.
+
 ## Capabilities (28)
 
 | Dominio | Capabilities |

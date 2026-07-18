@@ -1412,12 +1412,48 @@ func watchClaude(ctx context.Context, plan string, speaker speech.Speaker, confi
 					". Eso lo decide usted, en la ventana."))
 			return // hand control back — never auto-answered
 		case prompt.WatchDone:
-			say(speaker, pick("Claude has finished.", "Claude terminó, señor."))
+			reportClaude(ctx, plan, speaker)
 			return
 		}
 	}
 	say(speaker, pick("I'll stop watching Claude for now.",
 		"Dejo de seguir a Claude por ahora, señor."))
+}
+
+// reportClaude tells the user how the build went once Claude is done: it reads
+// the final terminal, has the reasoner summarize what was built and where it
+// lives — grounded in what actually happened — reads it aloud, and remembers it
+// so "how did the shop project end up?" can be recalled later.
+func reportClaude(ctx context.Context, plan string, speaker speech.Speaker) {
+	content, err := terminal.Capture(ctx, 40)
+	if err != nil {
+		content = ""
+	}
+	raw, err := planningReasoner().Chat(ctx, prompt.BuildReport(plan, projectsDir()), content)
+	if err != nil {
+		say(speaker, pick("Claude has finished, but I couldn't summarize how it went.",
+			"Claude terminó, señor, pero no pude resumir cómo fue."))
+		return
+	}
+	report := prompt.ParseReport(raw)
+	fmt.Printf("report: %s\n", report)
+	say(speaker, report)
+	if err := memory.Default().Remember("Project report — " + report); err != nil {
+		fmt.Fprintln(os.Stderr, "could not save report:", err)
+	}
+}
+
+// projectsDir is where project.new scaffolds — $HYPRVALET_PROJECTS_DIR, else
+// ~/proyectos. Kept in sync with the project adapter's own default.
+func projectsDir() string {
+	if d := strings.TrimSpace(os.Getenv("HYPRVALET_PROJECTS_DIR")); d != "" {
+		return d
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "proyectos"
+	}
+	return filepath.Join(home, "proyectos")
 }
 
 // runGated runs one capability through the daemon's confirm flow and reports

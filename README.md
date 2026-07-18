@@ -160,6 +160,26 @@ sequenceDiagram
     Note over You,C: You stay in the loop for every action.
 ```
 
+### Planning a project together
+
+On top of the bridge, hyprvalet can be a project partner. Say *"let's plan a
+project"* and it holds a conversation — asking questions before it commits to
+anything — then saves the plan to its own long-term memory. It offers to open
+the project in Claude Code and hand over the plan, and can stay and help:
+
+- **It answers Claude's design questions** — open-ended "how should we build
+  this?" questions — drafting the reply from the plan for you to approve.
+- **It never answers Claude's permission prompts.** Running a command, editing
+  or deleting files, trusting a folder — anything with consequences is surfaced
+  to you and the assistant stops. A conservative classifier treats anything it
+  is unsure about as a permission request.
+- **When Claude finishes, it tells you how it went** — a spoken summary of what
+  was built and where it lives, grounded in the terminal, saved so you can ask
+  about it later.
+
+The same rule runs through all of it: it converses on your behalf; it never
+consents on your behalf.
+
 ## Capabilities (28)
 
 | Domain | Capabilities |
