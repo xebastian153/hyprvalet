@@ -993,7 +993,7 @@ func (b *bargeSpeaker) Speak(_ context.Context, text string) error {
 	go func() {
 		// Fire cancelSpeak the moment speech begins — the assistant falls
 		// silent — then finish capturing what the user said.
-		if err := mic.ListenOnce(bargeCtx, b.wav, 0, cancelSpeak); err != nil {
+		if err := mic.ListenOnce(bargeCtx, b.wav, mic.Params{OnStart: cancelSpeak, Barge: true}); err != nil {
 			captured <- ""
 			return
 		}
@@ -1059,7 +1059,7 @@ func listenAndTranscribe(ctx context.Context, wav string, quiet bool, idle time.
 		status("listening", "hablá cuando quieras")
 	}
 	clearWave := listeningWave()
-	err := mic.ListenOnce(ctx, wav, idle, nil)
+	err := mic.ListenOnce(ctx, wav, mic.Params{Idle: idle})
 	clearWave()
 	if ctx.Err() != nil {
 		return "", listenCancel

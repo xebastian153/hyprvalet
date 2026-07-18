@@ -22,7 +22,7 @@ func TestListenOnceLive(t *testing.T) {
 
 	// In a quiet room nothing triggers, so cancellation is the expected exit —
 	// proving the capture loop starts, streams, and honors the context.
-	err := ListenOnce(ctx, filepath.Join(t.TempDir(), "u.wav"), 0, nil)
+	err := ListenOnce(ctx, filepath.Join(t.TempDir(), "u.wav"), Params{})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("quiet-room ListenOnce = %v, want deadline exceeded", err)
 	}

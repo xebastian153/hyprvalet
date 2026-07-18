@@ -44,19 +44,30 @@ const (
 	// floorFrames is the sliding window (~1s) whose minimum is the live noise
 	// floor the trigger threshold follows.
 	floorFrames = 33
+
+	// Barge-in tuning: much stricter than a normal listen so incidental noise
+	// (a cough, a keyboard, a short "mm") never cuts the assistant off. ~360ms
+	// of sustained voice, well above the floor.
+	bargeTriggerFrames   = 12
+	bargeThresholdFactor = 7.0
 )
+
+// Params tunes one capture. The zero value is the normal hands-free listen;
+// Barge raises the bar so a cough or click cannot interrupt the assistant.
+type Params struct {
+	Idle    time.Duration // >0: return ErrIdle if no speech begins within it
+	OnStart func()        // fired at speech onset (barge-in hook)
+	Barge   bool          // stricter trigger: only clear, sustained, louder speech starts
+}
 
 // ListenOnce blocks until one spoken utterance is captured, then writes it as
 // a 16kHz mono WAV at wavPath. Hands-free: speech starts the capture, a pause
-// ends it. The ambient noise floor is measured at the start of every call, so
-// the threshold adapts to the room as it is right now. Returns ctx.Err() when
-// cancelled. If idle > 0 and no speech begins within it, returns ErrIdle —
-// once an utterance starts, idle no longer applies; it always finishes.
-//
-// onStart, if non-nil, fires once the instant speech begins — before the
-// utterance finishes — which is what lets a caller stop the assistant's own
-// voice the moment the user talks over it (barge-in).
-func ListenOnce(ctx context.Context, wavPath string, idle time.Duration, onStart func()) error {
+// ends it. The ambient noise floor is tracked continuously, so the trigger
+// threshold follows the room. Returns ctx.Err() when cancelled; ErrIdle when
+// Params.Idle elapses with no speech (an utterance in progress always
+// finishes). OnStart fires the instant speech begins — the hook that lets a
+// caller stop the assistant's own voice mid-word when the user talks over it.
+func ListenOnce(ctx context.Context, wavPath string, p Params) error {
 	args := []string{"--rate", "16000", "--channels", "1", "--format", "s16"}
 	if target := defaultSource(); target != "" {
 		args = append(args, "--target", target)
@@ -132,8 +143,16 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration, onStart
 		}
 		levels = append(levels, frameRMS(frame))
 	}
+	// Barge-in interrupts the assistant, so a false trigger is far costlier
+	// than a missed one: demand louder, longer, sustained speech before it
+	// counts as the user talking over the reply.
+	factor, trigger := thresholdFactor, triggerFrames
+	if p.Barge {
+		factor, trigger = bargeThresholdFactor, bargeTriggerFrames
+	}
+
 	ambient := percentile(levels, 0.25)
-	threshold := math.Max(ambient*thresholdFactor, thresholdMin)
+	threshold := math.Max(ambient*factor, thresholdMin)
 	if ambient > loudAmbient {
 		// A loud room (music playing) raises the threshold so far that speech
 		// may never cross it — the assistant goes silently deaf. Deafness must
@@ -142,7 +161,7 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration, onStart
 	}
 
 	det := newVAD(vadConfig{
-		triggerFrames: triggerFrames,
+		triggerFrames: trigger,
 		endSilence:    endSilenceOf,
 		maxFrames:     maxUtterance,
 	}, threshold)
@@ -179,17 +198,17 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration, onStart
 		// Idle only governs the silence BEFORE speech begins; once an utterance
 		// is underway it always finishes. Time is counted in frames read, so it
 		// needs no clock.
-		if idle > 0 && len(utterance) == 0 {
+		if p.Idle > 0 && len(utterance) == 0 {
 			elapsed += frameMs * time.Millisecond
-			if elapsed >= idle {
+			if elapsed >= p.Idle {
 				return ErrIdle
 			}
 		}
 
 		switch det.feed(rms) {
 		case vadStart:
-			if onStart != nil {
-				onStart()
+			if p.OnStart != nil {
+				p.OnStart()
 			}
 			// The trigger frames themselves live in the pre-roll; keep it all.
 			for _, f := range preRoll {
