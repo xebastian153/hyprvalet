@@ -148,14 +148,7 @@ func runCap(reg *core.Registry, rules core.PolicyRules, id string, rest []string
 		os.Exit(2)
 	}
 
-	now := time.Now()
-	armState, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
-		os.Exit(1)
-	}
-
-	switch gate(cap, args, rules, armState, now) {
+	switch gate(cap, args, loadDecisionCtx(rules)) {
 	case gateDenied:
 		os.Exit(1)
 	case gateDeclined:
@@ -182,30 +175,91 @@ const (
 	gateDeclined                   // policy asked and the human said no
 )
 
-// gate evaluates the policy for one capability call and performs any
-// confirmation prompt. It prints the denial reason itself; the caller decides
-// what a denied or declined outcome means for its flow (a single run aborts;
-// a recipe stops). It is shared so recipes and hand-typed calls gate identically
-// — a recipe is never a permission bypass.
-func gate(cap core.Capability, args core.Args, rules core.PolicyRules, armState core.ArmState, now time.Time) gateResult {
-	switch core.Evaluate(rules, armState, cap, now) {
+// decisionCtx bundles everything a permission decision needs at one instant: the
+// policy, the current arming and session grants, and where to persist a new
+// session grant. It is built once per command and shared by every gated call in
+// it, so all of a command's decisions see the same world.
+type decisionCtx struct {
+	rules       core.PolicyRules
+	arm         core.ArmState
+	session     core.SessionAllow
+	sessionPath string
+	now         time.Time
+}
+
+func loadDecisionCtx(rules core.PolicyRules) decisionCtx {
+	now := time.Now()
+	arm, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
+		os.Exit(1)
+	}
+	sessionPath := policyfile.SessionAllowPath()
+	session, err := policyfile.LoadSessionAllow(sessionPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading session grants: %v\n", err)
+		os.Exit(1)
+	}
+	return decisionCtx{rules: rules, arm: arm, session: session, sessionPath: sessionPath, now: now}
+}
+
+// gate evaluates the policy (with session grants) for one capability call and
+// performs any prompt. It prints the denial reason itself; the caller decides
+// what a denied or declined outcome means for its flow. Shared so recipes,
+// plans, and hand-typed calls gate identically — never a permission bypass. An
+// "always" answer records a session grant so the same action stops prompting.
+func gate(cap core.Capability, args core.Args, dc decisionCtx) gateResult {
+	switch core.Decide(dc.rules, dc.arm, dc.session, cap, dc.now) {
 	case core.DecisionDeny:
-		r := rules.Resolve(cap)
-		if r.RequiresArming && !armState.IsArmed(cap.ID(), now) {
+		if r := dc.rules.Resolve(cap); r.RequiresArming && !dc.arm.IsArmed(cap.ID(), dc.now) {
 			fmt.Fprintf(os.Stderr,
 				"denied: %q requires arming — run 'hyprvalet arm %s' to grant %s\n",
-				cap.ID(), cap.ID(), rules.ArmFor(cap))
+				cap.ID(), cap.ID(), dc.rules.ArmFor(cap))
 		} else {
 			fmt.Fprintf(os.Stderr, "denied by policy: %q\n", cap.ID())
 		}
 		return gateDenied
 	case core.DecisionAsk:
-		if confirm(cap, args) {
+		switch promptDecision(cap, args) {
+		case answerAlways:
+			dc.session.Allow(cap.ID())
+			if err := policyfile.SaveSessionAllow(dc.sessionPath, dc.session); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not persist session grant: %v\n", err)
+			}
 			return gateProceed
+		case answerOnce:
+			return gateProceed
+		default:
+			return gateDeclined
 		}
-		return gateDeclined
 	default:
 		return gateProceed
+	}
+}
+
+type decisionAnswer int
+
+const (
+	answerNo decisionAnswer = iota
+	answerOnce
+	answerAlways
+)
+
+// promptDecision asks whether to run an Ask-tier action: once, always this
+// session, or no (the default). Non-TTY stdin (EOF) reads as no, so the tool
+// fails closed when it cannot ask.
+func promptDecision(cap core.Capability, args core.Args) decisionAnswer {
+	fmt.Printf("About to run %s (%s, risk=%s) with %v\n",
+		cap.ID(), cap.Access(), cap.Risk(), map[string]string(args))
+	fmt.Print("Allow? [o]nce / [a]lways this session / [N]o ")
+	line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "o", "once", "y", "yes":
+		return answerOnce
+	case "a", "always":
+		return answerAlways
+	default:
+		return answerNo
 	}
 }
 
@@ -345,12 +399,7 @@ func formatArgs(a core.Args) string {
 }
 
 func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
-	now := time.Now()
-	armState, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
-		os.Exit(1)
-	}
+	dc := loadDecisionCtx(rules)
 
 	fmt.Printf("running recipe %q:\n", r.Name)
 	printPlan(r)
@@ -363,7 +412,7 @@ func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
 			fmt.Fprintf(os.Stderr, "recipe %q step %d/%d: unknown capability %q\n", r.Name, i+1, n, s.Capability)
 			os.Exit(1)
 		}
-		switch gate(cap, s.Args, rules, armState, now) {
+		switch gate(cap, s.Args, dc) {
 		case gateDenied, gateDeclined:
 			fmt.Fprintf(os.Stderr, "recipe %q aborted at step %d/%d (%s)\n", r.Name, i+1, n, s.Capability)
 			os.Exit(1)
@@ -414,13 +463,7 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 		fmt.Printf("  reasoning: %s\n", intent.Reasoning)
 	}
 
-	now := time.Now()
-	armState, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
-		os.Exit(1)
-	}
-	switch gate(cap, intent.Args, rules, armState, now) {
+	switch gate(cap, intent.Args, loadDecisionCtx(rules)) {
 	case gateDenied:
 		os.Exit(1)
 	case gateDeclined:
@@ -471,12 +514,7 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 	}
 
 	// Evaluate every step up front, print the preview, and collect blockers.
-	now := time.Now()
-	armState, err := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error reading arm state: %v\n", err)
-		os.Exit(1)
-	}
+	dc := loadDecisionCtx(rules)
 
 	if plan.Summary != "" {
 		fmt.Printf("plan: %s\n", plan.Summary)
@@ -484,10 +522,10 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 	var blockers []string
 	for i, s := range plan.Steps {
 		cap, _ := reg.Get(s.Capability) // safe: Validate confirmed it exists
-		d := core.Evaluate(rules, armState, cap, now)
+		d := core.Decide(dc.rules, dc.arm, dc.session, cap, dc.now)
 		fmt.Printf("  %d. %s %s  [%s]\n", i+1, s.Capability, formatArgs(s.Args), d)
 		if d == core.DecisionDeny {
-			if r := rules.Resolve(cap); r.RequiresArming && !armState.IsArmed(cap.ID(), now) {
+			if r := dc.rules.Resolve(cap); r.RequiresArming && !dc.arm.IsArmed(cap.ID(), dc.now) {
 				blockers = append(blockers, fmt.Sprintf("step %d (%s) needs arming — run 'hyprvalet arm %s'", i+1, cap.ID(), cap.ID()))
 			} else {
 				blockers = append(blockers, fmt.Sprintf("step %d (%s) is denied by policy", i+1, cap.ID()))
@@ -538,12 +576,6 @@ func parseArgs(rest []string) (core.Args, error) {
 		args[strings.TrimSpace(k)] = v
 	}
 	return args, nil
-}
-
-func confirm(cap core.Capability, args core.Args) bool {
-	fmt.Printf("About to run %s (%s, risk=%s) with %v\n",
-		cap.ID(), cap.Access(), cap.Risk(), map[string]string(args))
-	return promptYes("Proceed?")
 }
 
 // promptYes asks a yes/no question, defaulting to no. Non-TTY stdin (EOF) reads
