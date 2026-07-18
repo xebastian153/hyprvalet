@@ -3,12 +3,18 @@ package mic
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"math"
 	"os"
 	"os/exec"
+	"time"
 )
+
+// ErrIdle is returned by ListenOnce when no speech begins within the idle
+// window — the signal a conversation uses to close itself after a quiet spell.
+var ErrIdle = errors.New("no speech within the idle window")
 
 // Hands-free capture parameters. Frames are 30ms of 16kHz mono s16 audio.
 const (
@@ -32,11 +38,12 @@ const (
 )
 
 // ListenOnce blocks until one spoken utterance is captured, then writes it as
-// a 16kHz mono WAV at wavPath. Hands-free: speech starts the capture, ~800ms
-// of silence ends it. The ambient noise floor is measured at the start of
-// every call, so the threshold adapts to the room as it is right now. Returns
-// ctx.Err() when cancelled.
-func ListenOnce(ctx context.Context, wavPath string) error {
+// a 16kHz mono WAV at wavPath. Hands-free: speech starts the capture, a pause
+// ends it. The ambient noise floor is measured at the start of every call, so
+// the threshold adapts to the room as it is right now. Returns ctx.Err() when
+// cancelled. If idle > 0 and no speech begins within it, returns ErrIdle —
+// once an utterance starts, idle no longer applies; it always finishes.
+func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 	args := []string{"--rate", "16000", "--channels", "1", "--format", "s16"}
 	if target := defaultSource(); target != "" {
 		args = append(args, "--target", target)
@@ -100,6 +107,7 @@ func ListenOnce(ctx context.Context, wavPath string) error {
 
 	var preRoll [][]byte
 	var utterance []byte
+	var elapsed time.Duration
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -109,6 +117,15 @@ func ListenOnce(ctx context.Context, wavPath string) error {
 				return ctx.Err()
 			}
 			return fmt.Errorf("reading audio: %w", err)
+		}
+		// Idle only governs the silence BEFORE speech begins; once an utterance
+		// is underway it always finishes. Time is counted in frames read, so it
+		// needs no clock.
+		if idle > 0 && len(utterance) == 0 {
+			elapsed += frameMs * time.Millisecond
+			if elapsed >= idle {
+				return ErrIdle
+			}
 		}
 
 		switch det.feed(frameRMS(frame)) {

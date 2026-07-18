@@ -51,8 +51,8 @@ type EventStore interface {
 // older than MemoryWindow — so the model sees a short, current story, not an
 // unbounded transcript.
 const (
-	MemoryEvents = 10
-	MemoryWindow = time.Hour
+	MemoryEvents = 20
+	MemoryWindow = 3 * time.Hour
 )
 
 // RecentEvents filters events to those within window of now, preserving order.

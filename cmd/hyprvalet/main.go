@@ -12,12 +12,15 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -885,13 +888,24 @@ func planNeedsConfirmation(steps []protocol.PlanStep) bool {
 	return false
 }
 
-// voiceCmd is the voice frontend: a HANDS-FREE conversational session. Voice
-// activity detection delimits each turn — speech starts the capture, silence
-// ends it — then the text runs the exact flow a typed `ctl do` uses: daemon
-// reasoning, plan preview, spoken confirmation, gated execution; then it
-// listens again. The session ends when the user says goodbye (or Ctrl+C /
-// closing the window). Voice is only an input method; it earns no shortcut
-// through the permission model, and a failed turn never ends the session.
+// idleTimeout is how long a conversation waits in silence before closing
+// itself. HYPRVALET_IDLE_SECONDS overrides it; 0 disables the auto-close.
+func idleTimeout() time.Duration {
+	if v := strings.TrimSpace(os.Getenv("HYPRVALET_IDLE_SECONDS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 60 * time.Second
+}
+
+// voiceCmd is the visible conversation: a HANDS-FREE session in a window. Once
+// it is open you just talk — no wake word between turns. Voice activity
+// detection delimits each turn; the text runs the same reasoned, gated flow as
+// a typed `ctl do`. The window stays until you close it, say goodbye, or fall
+// silent for the idle timeout. A first utterance may arrive via
+// HYPRVALET_FIRST (the command spoken with the wake word), so nothing said to
+// open the window is lost.
 func voiceCmd() {
 	wav := filepath.Join(os.TempDir(), fmt.Sprintf("hyprvalet-voice-%d.wav", os.Getpid()))
 	defer os.Remove(wav)
@@ -899,16 +913,40 @@ func voiceCmd() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Exactly one process may own the microphone. When the always-on watcher
+	// launched this window it is already blocked waiting for us (HYPRVALET_MANAGED),
+	// so it owns nothing. When opened standalone (a keybinding), pause the
+	// watcher for our lifetime so the two never capture at once.
+	if os.Getenv("HYPRVALET_MANAGED") != "1" {
+		_ = exec.Command("systemctl", "--user", "stop", "hyprvalet-listen").Run()
+		defer exec.Command("systemctl", "--user", "start", "hyprvalet-listen").Run()
+	}
+
 	speaker := animated{speakerChain()}
 	confirm := func(question string) bool { return voiceConfirm(ctx, speaker, question, wav) }
-	fmt.Println("voice session — hands-free: just speak; a pause ends your turn. Say goodbye to leave.")
+	idle := idleTimeout()
+
+	banner("Hablá cuando quieras — sin repetir el nombre. Decí \"chau\" o cerrá la ventana para salir.")
+
+	// The command spoken in the same breath as the wake word arrives here, so
+	// the very first thing you said is served before we listen for the next.
+	if first := strings.TrimSpace(os.Getenv("HYPRVALET_FIRST")); first != "" {
+		fmt.Printf("heard: %s\n", first)
+		if !farewells[normalizeUtterance(first)] {
+			processTurn(first, speaker, confirm)
+			fmt.Println()
+		}
+	}
 
 	for {
-		text, ok := listenAndTranscribe(ctx, wav, false)
-		if ctx.Err() != nil {
-			return // Ctrl+C or the window closing: leave quietly
-		}
-		if !ok {
+		text, res := listenAndTranscribe(ctx, wav, false, idle)
+		switch res {
+		case listenCancel:
+			return // Ctrl+C or the window closed
+		case listenIdle:
+			say(speaker, phrase("bye")) // fell silent — bow out
+			return
+		case listenNone:
 			continue // a failed turn never ends the session
 		}
 		fmt.Printf("heard: %s\n", text)
@@ -935,42 +973,57 @@ func processTurn(text string, speaker speech.Speaker, confirm func(string) bool)
 	}
 }
 
+// listenResult is the outcome of one capture-and-transcribe.
+type listenResult int
+
+const (
+	listenGot    listenResult = iota // text captured
+	listenNone                       // nothing usable (silence, noise, failure) — retry
+	listenIdle                       // no speech within the idle window — a conversation should close
+	listenCancel                     // context cancelled (Ctrl+C, window closed)
+)
+
 // listenAndTranscribe captures one hands-free utterance and returns its text.
 // A stale recording must never survive into the turn (the assistant would
 // transcribe its own past and repeat itself), so the WAV is deleted first.
-// quiet suppresses the per-turn chatter — the always-on service would
-// otherwise narrate every noise in the room into the journal.
-func listenAndTranscribe(ctx context.Context, wav string, quiet bool) (string, bool) {
+// quiet suppresses the per-turn chatter — the always-on service would otherwise
+// narrate every noise in the room into the journal. idle>0 makes a silent
+// stretch return listenIdle so a conversation can close itself; idle==0 waits
+// forever (the wake-word watcher).
+func listenAndTranscribe(ctx context.Context, wav string, quiet bool, idle time.Duration) (string, listenResult) {
 	_ = os.Remove(wav)
 	if !quiet {
-		fmt.Println("listening…")
+		status("listening", "hablá cuando quieras")
 	}
 	clearWave := listeningWave()
-	err := mic.ListenOnce(ctx, wav)
+	err := mic.ListenOnce(ctx, wav, idle)
 	clearWave()
 	if ctx.Err() != nil {
-		return "", false
+		return "", listenCancel
+	}
+	if errors.Is(err, mic.ErrIdle) {
+		return "", listenIdle
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		time.Sleep(2 * time.Second) // a broken recorder must not spin the loop
-		return "", false
+		return "", listenNone
 	}
 
+	if !quiet {
+		status("thinking", "")
+	}
 	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	text, err := whisper.Default().Transcribe(tctx, wav)
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		return "", false
+		return "", listenNone
 	}
-	if text == "" {
-		if !quiet {
-			fmt.Println("heard nothing")
-		}
-		return "", false
+	if strings.TrimSpace(text) == "" {
+		return "", listenNone
 	}
-	return text, true
+	return text, listenGot
 }
 
 // wakeWords parses HYPRVALET_WAKE_WORD: comma-separated alternates (so
@@ -1008,11 +1061,14 @@ func stripWake(text string, wakes map[string]bool) (string, bool) {
 	return "", false
 }
 
-// listenCmd is the always-on presence: a headless service that hears the room,
-// discards everything that does not address it — ambient speech is transcribed
-// locally ONLY to check for the wake word, then dropped — and serves the turn
-// that does. Say "jarvis, abrí el navegador" in one breath, or just "jarvis"
-// and it answers "¿Señor?" and waits for the command.
+// listenCmd is the always-on presence: a headless service that hears the room
+// and discards everything that does not address it by name — ambient speech is
+// transcribed locally ONLY to check for the wake word, then dropped. When the
+// wake word lands it OPENS the visible conversation window and waits for it to
+// close, then resumes listening. Opening a window (rather than answering in
+// place) is what gives the user a presence to see, and blocking on it keeps a
+// single owner of the microphone — the window and the watcher never capture at
+// once.
 func listenCmd() {
 	wav := filepath.Join(os.TempDir(), fmt.Sprintf("hyprvalet-listen-%d.wav", os.Getpid()))
 	defer os.Remove(wav)
@@ -1020,41 +1076,48 @@ func listenCmd() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	speaker := animated{speakerChain()}
-	confirm := func(question string) bool { return voiceConfirm(ctx, speaker, question, wav) }
-	wakes := wakeSetString()
-	fmt.Printf("always-on: waiting for the wake word (%s)\n", wakes)
-
+	fmt.Printf("always-on: waiting for the wake word (%s)\n", wakeSetString())
 	set := wakeWords()
 	for {
-		text, ok := listenAndTranscribe(ctx, wav, true)
-		if ctx.Err() != nil {
+		text, res := listenAndTranscribe(ctx, wav, true, 0) // idle 0: wait forever for the wake word
+		if res == listenCancel {
 			return
 		}
-		if !ok {
+		if res != listenGot {
 			continue
 		}
 		rest, woken := stripWake(text, set)
 		if !woken {
 			continue // the room's conversation is not ours to keep
 		}
-		fmt.Printf("heard: %s\n", text)
-
-		if rest == "" {
-			// Addressed by name alone: acknowledge and wait for the command.
-			say(speaker, phrase("attending"))
-			rest, ok = listenAndTranscribe(ctx, wav, true)
-			if !ok {
-				continue
-			}
-			fmt.Printf("heard: %s\n", rest)
-		}
-		if farewells[normalizeUtterance(rest)] {
-			say(speaker, phrase("bye"))
-			continue // a goodbye ends the exchange, not the presence
-		}
-		processTurn(rest, speaker, confirm)
+		fmt.Printf("wake: %s\n", text)
+		openConversation(ctx, rest)
 	}
+}
+
+// openConversation launches the visible voice window carrying the command
+// spoken with the wake word, and blocks until the window closes — so the
+// watcher is not competing for the microphone while a conversation is live. A
+// launch failure is reported and the watcher simply resumes.
+func openConversation(ctx context.Context, first string) {
+	self, err := os.Executable()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cannot locate hyprvalet binary: %v\n", err)
+		return
+	}
+	term := envOrDefault("HYPRVALET_TERMINAL", "alacritty")
+	cmd := exec.CommandContext(ctx, term, "--class", "hyprvalet-voice", "-e", self, "voice")
+	cmd.Env = append(os.Environ(), "HYPRVALET_FIRST="+first, "HYPRVALET_MANAGED=1")
+	if err := cmd.Run(); err != nil && ctx.Err() == nil {
+		fmt.Fprintf(os.Stderr, "conversation window exited: %v\n", err)
+	}
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+		return v
+	}
+	return fallback
 }
 
 // wakeSetString renders the configured wake words for the startup line.
@@ -1072,10 +1135,10 @@ func wakeSetString() string {
 // failed capture — declines. The gate fails closed in voice exactly as it
 // does on a keyboard.
 func voiceConfirm(ctx context.Context, speaker speech.Speaker, question, wav string) bool {
-	fmt.Println(question + " — say yes or no")
+	status("listening", question+" — sí o no")
 	say(speaker, phrase("confirm"))
-	text, ok := listenAndTranscribe(ctx, wav, false)
-	if !ok {
+	text, res := listenAndTranscribe(ctx, wav, false, 20*time.Second)
+	if res != listenGot {
 		return false
 	}
 	fmt.Printf("heard: %s\n", text)

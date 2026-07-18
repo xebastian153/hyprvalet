@@ -1,9 +1,10 @@
 package main
 
-// The console wave: purely cosmetic, purely frontend. A calm flat line while
-// the assistant listens; a moving waveform while it speaks. Hand-rolled with
-// block glyphs and ANSI — no TUI framework, no dependencies — and it draws
-// only on a real terminal, so piped output stays clean.
+// The console presence: purely cosmetic, purely frontend, TTY-only. A header
+// logo, a status line that names what the assistant is doing right now
+// (listening / thinking / speaking), and a waveform that is flat while it
+// listens and alive while it speaks. Hand-rolled with block glyphs and ANSI —
+// no TUI framework, no dependencies — so piped output stays clean.
 
 import (
 	"context"
@@ -19,13 +20,45 @@ import (
 
 var waveGlyphs = []rune("▁▂▃▄▅▆▇█")
 
-const waveWidth = 44
+const waveWidth = 46
+
+// logo is the standing banner of the conversation window.
+const logo = "\x1b[36m" + `
+   ┏  ┏━┓ ┏━┓ ┓ ┏ ┳ ┏━┓
+   ┃  ┣━┫ ┣┳┛ ┃┏┛ ┃ ┗━┓
+  ┗┛  ┛ ┗ ┛┗  ┗┛  ┻ ┗━┛   hyprvalet` + "\x1b[0m"
 
 // stdoutIsTTY reports whether stdout is an interactive terminal — animation
 // belongs on screens, never in pipes.
 func stdoutIsTTY() bool {
 	info, err := os.Stdout.Stat()
 	return err == nil && info.Mode()&os.ModeCharDevice != 0
+}
+
+// banner prints the logo and a one-line hint once, at the top of a session.
+func banner(hint string) {
+	if !stdoutIsTTY() {
+		return
+	}
+	fmt.Println(logo)
+	fmt.Printf("\x1b[2m  %s\x1b[0m\n\n", hint)
+}
+
+// status prints a labeled state line the user can read at a glance: a colored
+// dot, the state word, and a trailing detail. It overwrites its own line.
+func status(state, detail string) {
+	if !stdoutIsTTY() {
+		if detail != "" {
+			fmt.Println(detail)
+		}
+		return
+	}
+	dot := map[string]string{
+		"listening": "\x1b[32m●\x1b[0m", // green: your turn
+		"thinking":  "\x1b[33m◐\x1b[0m", // amber: working
+		"speaking":  "\x1b[36m◆\x1b[0m", // cyan: my turn
+	}[state]
+	fmt.Printf("\r\x1b[K%s \x1b[1m%s\x1b[0m  \x1b[2m%s\x1b[0m\n", dot, state, detail)
 }
 
 // listeningWave prints the calm line shown while recording: flat and still —
