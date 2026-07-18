@@ -221,6 +221,7 @@ las unidades systemd.
 | `HYPRVALET_WAKE_WORD` | palabra de activación + alternativas separadas por coma |
 | `HYPRVALET_BARGE_IN` | interrumpir mientras habla — requiere auriculares o cancelación de eco |
 | `HYPRVALET_PROJECTS_DIR` | dónde crea `project.new` — por defecto `~/proyectos` |
+| `HYPRVALET_MEMORY` | backend de memoria de largo plazo — `engram` (aislado, por defecto si está instalado) / `jsonl` |
 
 La política de permisos es un TOML propiedad del instalador en
 `~/.config/hyprvalet/policy.toml` (ver

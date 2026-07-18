@@ -1066,6 +1066,7 @@ func processTurn(ctx context.Context, text string, speaker speech.Speaker, confi
 // remembered, the request passes through untouched.
 func withMemory(text string) string {
 	const max = 12
+	store := memory.Default()
 	seen := map[string]bool{}
 	var notes []string
 	add := func(es []memory.Entry) {
@@ -1077,8 +1078,12 @@ func withMemory(text string) string {
 			notes = append(notes, e.Text)
 		}
 	}
-	add(memory.Search(text, max))
-	add(memory.Recent(max))
+	// Relevant notes first, then the most recent fill in. Recall failures read
+	// as an empty memory — the assistant answers without it, never breaks.
+	rel, _ := store.Search(text, max)
+	rec, _ := store.Recent(max)
+	add(rel)
+	add(rec)
 	if len(notes) == 0 {
 		return text
 	}

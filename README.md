@@ -218,6 +218,7 @@ systemd units.
 | `HYPRVALET_WAKE_WORD` | wake word + comma-separated alternates |
 | `HYPRVALET_BARGE_IN` | interrupt-while-speaking — needs headphones or echo cancellation |
 | `HYPRVALET_PROJECTS_DIR` | where `project.new` scaffolds — default `~/proyectos` |
+| `HYPRVALET_MEMORY` | long-term memory backend — `engram` (isolated, default when installed) / `jsonl` |
 
 The permission policy is an installer-owned TOML at
 `~/.config/hyprvalet/policy.toml` (see

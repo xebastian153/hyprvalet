@@ -1,10 +1,20 @@
 // Package memory is hyprvalet's own long-term memory — the assistant's private
-// notebook, on disk, that survives across sessions so it can remember you: your
-// name, your preferences, the projects you are planning. It is entirely the
-// assistant's own store; it has nothing to do with any external memory system.
+// notebook that survives across sessions so it can remember you: your name,
+// your preferences, the projects you are planning.
 //
-// The store is append-only JSON lines: durable, greppable, and crash-tolerant
-// (a torn final line loses one note, not the file).
+// Memory is a port (the Store interface) with two backends, chosen the same way
+// the rest of hyprvalet composes for resilience (Groq→Ollama, ElevenLabs→Edge):
+//
+//   - engram — the assistant reuses Engram (github.com/Gentleman-Programming/engram),
+//     a single Go binary with SQLite + FTS5. It runs against a data directory of
+//     its OWN, entirely separate from any Engram the user runs for other agents,
+//     so the two never touch. This backend brings ranking, a browsable TUI, and
+//     export for free. Used by default when the `engram` binary is present.
+//   - jsonl — a zero-dependency append-only JSON-lines file. Always available,
+//     offline, crash-tolerant (a torn final line loses one note, not the file).
+//     The fallback when Engram is not installed.
+//
+// HYPRVALET_MEMORY forces a backend (engram|jsonl); the default is auto.
 package memory
 
 import (
@@ -13,6 +23,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -25,6 +36,42 @@ import (
 func Capabilities() []core.Capability {
 	return []core.Capability{remember{}, recall{}, forget{}}
 }
+
+// Store is the memory port: a place the assistant remembers things and recalls
+// them later. Both backends implement it; capabilities and the reasoning layer
+// depend only on this interface.
+type Store interface {
+	Remember(text string) error
+	Search(query string, n int) ([]Entry, error)
+	Recent(n int) ([]Entry, error)
+	Forget(query string) (int, error)
+}
+
+// Default selects the memory backend: Engram when its binary is present (unless
+// overridden), the zero-dependency JSON-lines store otherwise — so the
+// assistant is never left without a memory.
+func Default() Store {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HYPRVALET_MEMORY"))) {
+	case "jsonl", "file":
+		return jsonlStore{}
+	case "engram":
+		return newEngramStore()
+	default:
+		if _, err := exec.LookPath("engram"); err == nil {
+			return newEngramStore()
+		}
+		return jsonlStore{}
+	}
+}
+
+// jsonlStore is the zero-dependency backend: it fulfils the Store port with the
+// append-only JSON-lines file below.
+type jsonlStore struct{}
+
+func (jsonlStore) Remember(text string) error              { return Remember(text) }
+func (jsonlStore) Search(q string, n int) ([]Entry, error) { return Search(q, n), nil }
+func (jsonlStore) Recent(n int) ([]Entry, error)           { return Recent(n), nil }
+func (jsonlStore) Forget(query string) (int, error)        { return forgetJSONL(query) }
 
 // Path is where the assistant keeps its long-term memory:
 // $XDG_DATA_HOME/hyprvalet/memory.jsonl, else ~/.local/share/hyprvalet/.
@@ -199,7 +246,7 @@ func (remember) Run(_ context.Context, args core.Args) (string, error) {
 	if text == "" {
 		return "", core.Validationf("missing required arg %q (what to remember)", "text")
 	}
-	if err := Remember(text); err != nil {
+	if err := Default().Remember(text); err != nil {
 		return "", err
 	}
 	return "I will remember that", nil
@@ -218,7 +265,10 @@ func (recall) Run(_ context.Context, args core.Args) (string, error) {
 	if q == "" {
 		return "", core.Validationf("missing required arg %q (what to recall)", "query")
 	}
-	hits := Search(q, 8)
+	hits, err := Default().Search(q, 8)
+	if err != nil {
+		return "", err
+	}
 	if len(hits) == 0 {
 		return "I don't remember anything about that", nil
 	}
@@ -243,30 +293,38 @@ func (forget) Run(_ context.Context, args core.Args) (string, error) {
 	if q == "" {
 		return "", core.Validationf("missing required arg %q (what to forget)", "query")
 	}
-	words := strings.Fields(strings.ToLower(q))
+	removed, err := Default().Forget(q)
+	if err != nil {
+		return "", err
+	}
+	if removed == 0 {
+		return "there was nothing to forget about that", nil
+	}
+	return fmt.Sprintf("forgot %d note(s)", removed), nil
+}
+
+// forgetJSONL removes every JSON-lines note whose text overlaps the query, by
+// the same word-boundary rule the JSONL search uses.
+func forgetJSONL(query string) (int, error) {
+	terms := content(query)
+	if len(terms) == 0 {
+		return 0, nil
+	}
 	all := All()
 	var kept []Entry
 	removed := 0
 	for _, e := range all {
-		low := strings.ToLower(e.Text)
-		match := false
-		for _, w := range words {
-			if len(w) >= 3 && strings.Contains(low, w) {
-				match = true
-				break
-			}
-		}
-		if match {
+		if overlaps(terms, content(e.Text)) {
 			removed++
 		} else {
 			kept = append(kept, e)
 		}
 	}
 	if removed == 0 {
-		return "there was nothing to forget about that", nil
+		return 0, nil
 	}
 	if err := rewrite(kept); err != nil {
-		return "", err
+		return 0, err
 	}
-	return fmt.Sprintf("forgot %d note(s)", removed), nil
+	return removed, nil
 }

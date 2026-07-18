@@ -12,10 +12,13 @@ var (
 	_ core.Capability = forget{}
 )
 
-// isolate points the store at a temp file for the duration of a test.
+// isolate points the store at a temp file and forces the JSON-lines backend,
+// so these tests exercise it deterministically whether or not engram is
+// installed on the machine running them.
 func isolate(t *testing.T) {
 	t.Helper()
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	t.Setenv("HYPRVALET_MEMORY", "jsonl")
 }
 
 func TestRememberThenRecall(t *testing.T) {
