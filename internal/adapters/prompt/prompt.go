@@ -151,16 +151,26 @@ func recentActions(recent []core.Event, now time.Time) string {
 	return b.String()
 }
 
+// persona is who the assistant IS when it talks: a butler-grade presence —
+// composed, concise, quietly witty. Replies are spoken aloud, so brevity is a
+// feature, not a style choice.
+const persona = "You are hyprvalet, the user's personal voice assistant for this Linux desktop — think of a butler: " +
+	"composed, courteous, quietly witty, never verbose. Address the user respectfully (in Spanish, use \"señor\"). " +
+	"The user may call you Jarvis; answer to it.\n"
+
 // conversationRule teaches the model the third outcome: talk. A reply is words
 // only — the caller speaks it and executes nothing — so the rule insists an
-// action is preferred whenever one fits, and honesty over invention otherwise.
+// action is preferred whenever one fits. General knowledge is fair game — the
+// user deserves a real assistant, not a menu reader — but facts about THIS
+// system that the prompt does not show must never be invented.
 // The field contract is spelled out structurally: small models otherwise put
 // the word "reply" into the capability field.
 const conversationRule = "You always fill exactly one of two fields, never both:\n" +
 	"- an action: the capability field holds an id copied from the list (and reply stays \"\").\n" +
-	"- an answer: the reply field holds one short sentence in the user's language, spoken aloud to the user (and capability stays \"\").\n" +
+	"- an answer: the reply field holds one to three short sentences in the user's language, spoken aloud (and capability stays \"\").\n" +
 	"Use an answer when the user greets, thanks, or asks you something instead of requesting an action. " +
-	"Answer only from what you see here (your capabilities, the recent history); if you do not know something, say so. " +
+	"Answer general questions from your own knowledge, briefly and confidently. " +
+	"Never invent facts about this system that you cannot see here; if you do not know, say so. " +
 	"Whenever an action fits the request, always prefer the action.\n"
 
 // BuildIntent is the system prompt for single-intent interpretation. The JSON
@@ -168,7 +178,7 @@ const conversationRule = "You always fill exactly one of two fields, never both:
 // schema parameter — the prompt is the only carrier of the contract there.
 func BuildIntent(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
-	b.WriteString("You are hyprvalet, a voice assistant controlling this Linux desktop.\n")
+	b.WriteString(persona)
 	b.WriteString("You translate a user's desktop request into exactly one capability from the list below.\n")
 	b.WriteString("Respond with only a JSON object shaped {\"capability\": \"\", \"args\": {}, \"reply\": \"\", \"reasoning\": \"\"}.\n")
 	b.WriteString("Choose the single capability whose action best matches the request and fill its arguments.\n")
@@ -186,7 +196,7 @@ func BuildIntent(caps []core.Capability, recent []core.Event) string {
 // empty plan).
 func BuildPlan(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
-	b.WriteString("You are hyprvalet, a voice assistant controlling this Linux desktop.\n")
+	b.WriteString(persona)
 	b.WriteString("You turn a user's desktop request into an ordered plan of one or more capability calls from the list below.\n")
 	b.WriteString("Respond with only a JSON object shaped {\"summary\": \"\", \"steps\": [{\"capability\": \"\", \"args\": {}}]}.\n")
 	b.WriteString("Use as many steps as the request needs, in the order they should run, and fill each step's arguments.\n")
