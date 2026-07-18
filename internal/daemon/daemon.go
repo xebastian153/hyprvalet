@@ -267,7 +267,7 @@ func (d *Daemon) handleRun(req protocol.Request) protocol.Response {
 	out, err := cap.Run(context.Background(), args)
 	if err != nil {
 		d.emit(core.EventFailed, cap.ID(), args, err.Error())
-		return protocol.Response{Status: protocol.StatusError, Error: err.Error()}
+		return protocol.Response{Status: protocol.StatusError, Error: err.Error(), Retryable: core.IsValidation(err)}
 	}
 	d.history = append(d.history, core.ActionRecord{Signature: sig, At: now})
 	// Persist the history so the one-shot CLI's doom-loop check sees actions the

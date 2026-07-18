@@ -34,7 +34,7 @@ func (runCommand) Params() []string { return []string{"args"} }
 func (runCommand) Run(ctx context.Context, args core.Args) (string, error) {
 	raw := strings.TrimSpace(args["args"])
 	if raw == "" {
-		return "", fmt.Errorf("missing required arg %q (the omarchy subcommand, e.g. \"restart waybar\")", "args")
+		return "", core.Validationf("missing required arg %q (the omarchy subcommand, e.g. \"restart waybar\")", "args")
 	}
 	parts := strings.Fields(raw)
 	out, err := exec.CommandContext(ctx, "omarchy", parts...).CombinedOutput()

@@ -1,6 +1,7 @@
 package hypr
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -106,5 +107,17 @@ func TestValidateLaunchCmdErrorIsCorrective(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "metacharacter") {
 		t.Fatalf("error should explain the metacharacter rule, got: %v", err)
+	}
+}
+
+// Argument rejections must be typed ValidationErrors so the corrective retry
+// loop can tell the model's mistakes (feed back, retry) from the world's
+// failures (surface to the human).
+func TestArgRejectionsAreValidationErrors(t *testing.T) {
+	if _, err := (switchWorkspace{}).Run(context.Background(), core.Args{"workspace": "the previous"}); !core.IsValidation(err) {
+		t.Fatalf("bad workspace arg must be a ValidationError, got: %v", err)
+	}
+	if _, err := (openApp{}).Run(context.Background(), core.Args{"cmd": "a; b"}); !core.IsValidation(err) {
+		t.Fatalf("metacharacter rejection must be a ValidationError, got: %v", err)
 	}
 }

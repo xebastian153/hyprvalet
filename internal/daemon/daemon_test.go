@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log"
 	"net"
@@ -15,10 +16,11 @@ import (
 )
 
 // demoCap is a harmless capability for daemon tests: its Run records that it ran
-// and returns a canned string, touching no real desktop.
+// and returns a canned string (or a canned error), touching no real desktop.
 type demoCap struct {
-	id  string
-	ran *bool
+	id     string
+	ran    *bool
+	runErr error
 }
 
 func (c demoCap) ID() string            { return c.id }
@@ -27,6 +29,9 @@ func (demoCap) Access() core.AccessKind { return core.AccessWorkspace }
 func (demoCap) Risk() core.Risk         { return core.RiskSafe }
 func (demoCap) Params() []string        { return nil }
 func (c demoCap) Run(context.Context, core.Args) (string, error) {
+	if c.runErr != nil {
+		return "", c.runErr
+	}
 	if c.ran != nil {
 		*c.ran = true
 	}
@@ -382,6 +387,26 @@ func TestHandleRunPersistsHistory(t *testing.T) {
 	if len(saved) != 1 || saved[0].Signature != core.ActionSignature("a.b", nil) {
 		t.Fatalf("persisted history = %+v", saved)
 	}
+}
+
+func TestHandleRunMarksValidationErrorsRetryable(t *testing.T) {
+	allow := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAllow}}}
+
+	t.Run("validation rejection is retryable", func(t *testing.T) {
+		d := testDaemon(t, allow, demoCap{id: "a.b", runErr: core.Validationf("arg %q must be >= 1", "workspace")})
+		resp := d.handle(protocol.Request{Op: protocol.OpRun, Cap: "a.b"})
+		if resp.Status != protocol.StatusError || !resp.Retryable {
+			t.Fatalf("validation failure = %+v, want error with Retryable", resp)
+		}
+	})
+
+	t.Run("runtime failure is not retryable", func(t *testing.T) {
+		d := testDaemon(t, allow, demoCap{id: "a.b", runErr: errors.New("hyprctl: connection refused")})
+		resp := d.handle(protocol.Request{Op: protocol.OpRun, Cap: "a.b"})
+		if resp.Status != protocol.StatusError || resp.Retryable {
+			t.Fatalf("runtime failure = %+v, want error without Retryable (re-asking the model cannot fix the world)", resp)
+		}
+	})
 }
 
 func TestHandleEvaluateDoesNotRun(t *testing.T) {

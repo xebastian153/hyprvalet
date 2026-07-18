@@ -46,10 +46,10 @@ const shellMeta = ";&|<>$`\n\r\\!*?(){}[]"
 func validateLaunchCmd(raw string) (string, error) {
 	cmd := strings.TrimSpace(raw)
 	if cmd == "" {
-		return "", fmt.Errorf("missing required arg %q (the command to launch)", "cmd")
+		return "", core.Validationf("missing required arg %q (the command to launch)", "cmd")
 	}
 	if i := strings.IndexAny(cmd, shellMeta); i >= 0 {
-		return "", fmt.Errorf(
+		return "", core.Validationf(
 			"arg %q may not contain the shell metacharacter %q — app.open launches a single program (e.g. %q or %q), not a shell command",
 			"cmd", string(cmd[i]), "firefox", "alacritty -e nvim")
 	}
@@ -60,14 +60,14 @@ func validateLaunchCmd(raw string) (string, error) {
 func workspaceArg(args core.Args) (int, error) {
 	raw, ok := args["workspace"]
 	if !ok || strings.TrimSpace(raw) == "" {
-		return 0, fmt.Errorf("missing required arg %q (a workspace number)", "workspace")
+		return 0, core.Validationf("missing required arg %q (a workspace number)", "workspace")
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(raw))
 	if err != nil {
-		return 0, fmt.Errorf("arg %q must be an integer, got %q", "workspace", raw)
+		return 0, core.Validationf("arg %q must be an integer, got %q", "workspace", raw)
 	}
 	if n < 1 {
-		return 0, fmt.Errorf("arg %q must be >= 1, got %d", "workspace", n)
+		return 0, core.Validationf("arg %q must be >= 1, got %d", "workspace", n)
 	}
 	return n, nil
 }
