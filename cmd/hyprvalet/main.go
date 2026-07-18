@@ -815,56 +815,38 @@ var farewells = map[string]bool{
 	"nos vemos": true, "goodbye": true, "bye": true, "exit": true, "quit": true,
 }
 
-// voiceCmd is the voice frontend: a conversational SESSION, not a one-shot.
-// Each turn records until Enter, transcribes locally, and hands the text to
-// the exact flow a typed `ctl do` uses — daemon reasoning, plan preview, one
-// confirmation, gated execution — then listens again. The session ends when
-// the user says goodbye, types q, or closes the stream (Ctrl+D). Voice is only
-// an input method; it earns no shortcut through the permission model, and a
-// failed request ends the turn, never the session.
+// affirmatives are the spoken ways to approve a plan. Anything else is a no —
+// a confirmation gate fails closed, in voice exactly as on a keyboard.
+var affirmatives = map[string]bool{
+	"sí": true, "si": true, "dale": true, "claro": true, "hacelo": true,
+	"confirmo": true, "yes": true, "yep": true, "ok": true, "okay": true, "sure": true,
+}
+
+// voiceCmd is the voice frontend: a HANDS-FREE conversational session. Voice
+// activity detection delimits each turn — speech starts the capture, silence
+// ends it — then the text runs the exact flow a typed `ctl do` uses: daemon
+// reasoning, plan preview, spoken confirmation, gated execution; then it
+// listens again. The session ends when the user says goodbye (or Ctrl+C /
+// closing the window). Voice is only an input method; it earns no shortcut
+// through the permission model, and a failed turn never ends the session.
 func voiceCmd() {
 	wav := filepath.Join(os.TempDir(), fmt.Sprintf("hyprvalet-voice-%d.wav", os.Getpid()))
 	defer os.Remove(wav)
 
-	speaker := speakerChain()
-	stdin := bufio.NewReader(os.Stdin)
-	fmt.Println("voice session — speak, then press Enter. Say goodbye (or type q) to leave.")
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	speaker := animated{speakerChain()}
+	confirm := func(question string) bool { return voiceConfirm(ctx, speaker, question, wav) }
+	fmt.Println("voice session — hands-free: just speak; a pause ends your turn. Say goodbye to leave.")
 
 	for {
-		// A stale recording must never survive into this turn: if the recorder
-		// failed to start, transcribing the previous turn's audio would make
-		// the assistant eerily repeat itself. Delete first, so a failed
-		// recording surfaces as an error instead of an echo.
-		_ = os.Remove(wav)
-		stop, err := mic.Start(wav)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
+		text, ok := listenAndTranscribe(ctx, wav)
+		if ctx.Err() != nil {
+			return // Ctrl+C or the window closing: leave quietly
 		}
-		fmt.Println("listening…")
-		line, readErr := stdin.ReadString('\n')
-		stopErr := stop()
-		if readErr != nil || strings.TrimSpace(line) == "q" {
-			// Stream closed or an explicit quit: leave without transcribing.
-			say(speaker, phrase("bye"))
-			return
-		}
-		if stopErr != nil {
-			// A dead recording ends the turn, never the session.
-			fmt.Fprintf(os.Stderr, "error: %v\n", stopErr)
-			continue
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		text, err := whisper.Default().Transcribe(ctx, wav)
-		cancel()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			continue // a failed transcription ends the turn, not the session
-		}
-		if text == "" {
-			fmt.Println("heard nothing — try again closer to the microphone")
-			continue
+		if !ok {
+			continue // a failed turn never ends the session
 		}
 		fmt.Printf("heard: %s\n", text)
 
@@ -873,9 +855,56 @@ func voiceCmd() {
 			return
 		}
 
-		ctlPlan([]string{text}, true, speaker)
+		ctlPlan([]string{text}, true, speaker, confirm)
 		fmt.Println()
 	}
+}
+
+// listenAndTranscribe captures one hands-free utterance and returns its text.
+// A stale recording must never survive into the turn (the assistant would
+// transcribe its own past and repeat itself), so the WAV is deleted first.
+func listenAndTranscribe(ctx context.Context, wav string) (string, bool) {
+	_ = os.Remove(wav)
+	fmt.Println("listening…")
+	clearWave := listeningWave()
+	err := mic.ListenOnce(ctx, wav)
+	clearWave()
+	if ctx.Err() != nil {
+		return "", false
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		time.Sleep(2 * time.Second) // a broken recorder must not spin the loop
+		return "", false
+	}
+
+	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	text, err := whisper.Default().Transcribe(tctx, wav)
+	cancel()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		return "", false
+	}
+	if text == "" {
+		fmt.Println("heard nothing")
+		return "", false
+	}
+	return text, true
+}
+
+// voiceConfirm is the spoken confirmation gate: ask aloud, listen for an
+// affirmative. Anything that is not clearly a yes — silence, noise, "no", a
+// failed capture — declines. The gate fails closed in voice exactly as it
+// does on a keyboard.
+func voiceConfirm(ctx context.Context, speaker speech.Speaker, question, wav string) bool {
+	fmt.Println(question + " — say yes or no")
+	say(speaker, phrase("confirm"))
+	text, ok := listenAndTranscribe(ctx, wav)
+	if !ok {
+		return false
+	}
+	fmt.Printf("heard: %s\n", text)
+	return affirmatives[normalizeUtterance(text)]
 }
 
 // normalizeUtterance lowers and strips punctuation/accents-adjacent noise so a
@@ -944,11 +973,11 @@ func ctlCmd(args []string) {
 	case "ask":
 		ctlAsk(args[1:])
 	case "plan":
-		if !ctlPlan(args[1:], false, nil) {
+		if !ctlPlan(args[1:], false, nil, promptYes) {
 			os.Exit(1)
 		}
 	case "do":
-		if !ctlPlan(args[1:], true, nil) {
+		if !ctlPlan(args[1:], true, nil, promptYes) {
 			os.Exit(1)
 		}
 	default:
@@ -980,7 +1009,7 @@ func sayCmd(rest []string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := speakerChain().Speak(ctx, text); err != nil {
+	if err := (animated{speakerChain()}).Speak(ctx, text); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
@@ -996,6 +1025,7 @@ var spokenPhrases = map[string]map[string]string{
 		"denied":  "That is not permitted.",
 		"nothing": "I found nothing I can do for that.",
 		"bye":     "Goodbye.",
+		"confirm": "Shall I proceed?",
 	},
 	"Spanish": {
 		"done":    "Listo.",
@@ -1003,6 +1033,7 @@ var spokenPhrases = map[string]map[string]string{
 		"denied":  "Eso no está permitido.",
 		"nothing": "No encontré nada que pueda hacer con eso.",
 		"bye":     "Hasta luego.",
+		"confirm": "¿Procedo?",
 	},
 }
 
@@ -1099,7 +1130,7 @@ func ctlAsk(rest []string) {
 // speaker voices the summary and the outcome (the voice frontend passes one).
 // It reports failure instead of exiting so a voice SESSION survives a failed
 // request; the one-shot ctl wrapper turns false into an exit code.
-func ctlPlan(rest []string, execute bool, speaker speech.Speaker) bool {
+func ctlPlan(rest []string, execute bool, speaker speech.Speaker, confirm func(string) bool) bool {
 	request := strings.TrimSpace(strings.Join(rest, " "))
 	if request == "" {
 		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl plan|do \"<what you want>\"")
@@ -1153,7 +1184,7 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker) bool {
 	if !execute {
 		return true // `ctl plan` previews only
 	}
-	if !promptYes(fmt.Sprintf("execute this %d-step plan?", len(resp.Plan))) {
+	if !confirm(fmt.Sprintf("execute this %d-step plan?", len(resp.Plan))) {
 		fmt.Println("aborted")
 		return true
 	}
