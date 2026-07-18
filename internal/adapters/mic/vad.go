@@ -1,6 +1,9 @@
 package mic
 
-import "math"
+import (
+	"math"
+	"sort"
+)
 
 // Voice activity detection by frame energy: speech raises the RMS of the
 // signal above the ambient floor; sustained silence after it marks the end of
@@ -83,6 +86,18 @@ func (v *vad) reset() {
 	v.voiced = 0
 	v.silent = 0
 	v.length = 0
+}
+
+// percentile returns the value at fraction p (0..1) of the sorted samples — a
+// noise-floor estimate robust to speech mixed into the calibration window.
+func percentile(samples []float64, p float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := append([]float64(nil), samples...)
+	sort.Float64s(sorted)
+	i := int(p * float64(len(sorted)-1))
+	return sorted[i]
 }
 
 // frameRMS computes the root-mean-square energy of one s16le PCM frame.

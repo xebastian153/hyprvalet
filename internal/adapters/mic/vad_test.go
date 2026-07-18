@@ -75,3 +75,15 @@ func TestFrameRMS(t *testing.T) {
 		t.Fatalf("constant-1000 RMS = %v, want ~1000", rms)
 	}
 }
+
+func TestPercentileRobustToSpeech(t *testing.T) {
+	// A quiet floor of ~100 with loud speech spikes mixed in — the low
+	// percentile must recover the floor, not the mean (which the speech skews).
+	samples := []float64{95, 100, 105, 98, 3000, 2800, 3200, 102, 99, 101}
+	if got := percentile(samples, 0.25); got < 90 || got > 110 {
+		t.Fatalf("percentile(0.25) = %.0f, want the ~100 floor, not the speech-skewed mean", got)
+	}
+	if percentile(nil, 0.25) != 0 {
+		t.Fatal("empty samples must be 0")
+	}
+}

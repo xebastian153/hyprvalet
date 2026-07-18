@@ -112,15 +112,19 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 		}
 	}
 
-	// Calibrate: learn the room before listening for a voice.
-	var ambient float64
+	// Calibrate: learn the room's NOISE FLOOR before listening for a voice.
+	// The floor is the quiet part of the signal, so a robust low percentile is
+	// used, not the mean — otherwise talking during calibration (common right
+	// after a turn) is measured as "ambient" and the threshold shoots so high
+	// the assistant goes deaf to the very voice that raised it.
+	levels := make([]float64, 0, calibrateFrames)
 	for i := 0; i < calibrateFrames; i++ {
 		if err := readFrame(); err != nil {
 			return err
 		}
-		ambient += frameRMS(frame)
+		levels = append(levels, frameRMS(frame))
 	}
-	ambient /= calibrateFrames
+	ambient := percentile(levels, 0.25)
 	threshold := math.Max(ambient*thresholdFactor, thresholdMin)
 	if ambient > loudAmbient {
 		// A loud room (music playing) raises the threshold so far that speech
