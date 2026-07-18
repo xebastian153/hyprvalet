@@ -6,6 +6,14 @@ import (
 	"time"
 )
 
+// Doom-loop tuning: after this many identical calls within this window, a caller
+// should force a confirmation before running the action again. Shared by the CLI
+// gate and the daemon so both cut a degenerate loop at the same point.
+const (
+	DoomLoopThreshold = 3
+	DoomLoopWindow    = 30 * time.Second
+)
+
 // ActionRecord is one past capability execution: a canonical signature and when
 // it ran. A short rolling history of these lets the gate notice a degenerate
 // loop — the same action firing over and over with real side effects — and force

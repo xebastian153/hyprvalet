@@ -1,0 +1,29 @@
+package daemon
+
+import (
+	"encoding/json"
+	"fmt"
+	"net"
+
+	"github.com/xebastian153/hyprvalet/internal/protocol"
+)
+
+// Send is the thin client: it opens a connection to the daemon at socketPath,
+// sends one request, and returns the one response. A refused connection is
+// reported with a hint that the daemon may not be running.
+func Send(socketPath string, req protocol.Request) (protocol.Response, error) {
+	conn, err := net.Dial("unix", socketPath)
+	if err != nil {
+		return protocol.Response{}, fmt.Errorf("connecting to daemon at %s: %w (is it running? start it with 'hyprvalet daemon')", socketPath, err)
+	}
+	defer conn.Close()
+
+	if err := json.NewEncoder(conn).Encode(req); err != nil {
+		return protocol.Response{}, fmt.Errorf("sending request: %w", err)
+	}
+	var resp protocol.Response
+	if err := json.NewDecoder(conn).Decode(&resp); err != nil {
+		return protocol.Response{}, fmt.Errorf("reading response: %w", err)
+	}
+	return resp, nil
+}
