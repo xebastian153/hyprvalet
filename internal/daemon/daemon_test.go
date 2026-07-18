@@ -340,6 +340,34 @@ func TestReasonPlanEmptyIsNotAnError(t *testing.T) {
 	}
 }
 
+func TestReasonPlanFallsBackToIntent(t *testing.T) {
+	allow := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAllow}}}
+
+	t.Run("conversation gets a reply", func(t *testing.T) {
+		d := testDaemon(t, allow, demoCap{id: "a.b"})
+		d.planner = fakePlanner{plan: core.Plan{}}
+		d.llm = fakeLLM{intent: core.Intent{Reply: "I control your desktop."}}
+		socket := runDaemon(t, d)
+
+		resp, err := PlanViaDaemon(socket, "who are you?")
+		if err != nil || resp.Reply != "I control your desktop." || len(resp.Plan) != 0 {
+			t.Fatalf("chat fallback = %+v err=%v", resp, err)
+		}
+	})
+
+	t.Run("a missed single action is rescued", func(t *testing.T) {
+		d := testDaemon(t, allow, demoCap{id: "a.b"})
+		d.planner = fakePlanner{plan: core.Plan{}}
+		d.llm = fakeLLM{intent: core.Intent{Capability: "a.b"}}
+		socket := runDaemon(t, d)
+
+		resp, err := PlanViaDaemon(socket, "do the thing")
+		if err != nil || len(resp.Plan) != 1 || resp.Plan[0].Cap != "a.b" || resp.Plan[0].Decision != "allow" {
+			t.Fatalf("rescue fallback = %+v err=%v", resp, err)
+		}
+	})
+}
+
 func TestHandleRunAuditsOutcomes(t *testing.T) {
 	rule := func(d core.Decision) core.PolicyRules {
 		return core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: d}}}

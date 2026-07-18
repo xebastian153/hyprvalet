@@ -669,9 +669,14 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 	}
 
 	if len(plan.Steps) == 0 {
-		if plan.Reply != "" {
-			fmt.Println(plan.Reply)
-			emitEvent(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, plan.Reply))
+		// The planner plans; conversation is the intent layer's job. Fall back
+		// to it so a chat request still gets an answer.
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+		intent, ierr := ollama.Default().Interpret(ctx, request, reg.List(), recentEvents())
+		cancel()
+		if ierr == nil && intent.Capability == "" && intent.Reply != "" {
+			fmt.Println(intent.Reply)
+			emitEvent(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, intent.Reply))
 			return
 		}
 		fmt.Println("no plan — the model found nothing it could do for that request")
@@ -876,6 +881,35 @@ func ctlCmd(args []string) {
 	}
 }
 
+// spokenPhrases are the few fixed sentences the voice frontend speaks, keyed by
+// HYPRVALET_LANG. English is the default; the language should match the
+// installed TTS voice (HYPRVALET_VOICE) — they are two halves of one choice.
+var spokenPhrases = map[string]map[string]string{
+	"English": {
+		"done":    "Done.",
+		"stopped": "I had to stop.",
+		"denied":  "That is not permitted.",
+		"nothing": "I found nothing I can do for that.",
+	},
+	"Spanish": {
+		"done":    "Listo.",
+		"stopped": "Tuve que detenerme.",
+		"denied":  "Eso no está permitido.",
+		"nothing": "No encontré nada que pueda hacer con eso.",
+	},
+}
+
+// phrase resolves one fixed spoken sentence for the configured language,
+// falling back to English for unknown languages or missing keys.
+func phrase(key string) string {
+	if set, ok := spokenPhrases[strings.TrimSpace(os.Getenv("HYPRVALET_LANG"))]; ok {
+		if p := set[key]; p != "" {
+			return p
+		}
+	}
+	return spokenPhrases["English"][key]
+}
+
 // say speaks text when a speaker is present. Speech is an output garnish:
 // failures warn and are swallowed, never changing what the command does.
 func say(speaker *tts.Client, text string) {
@@ -980,7 +1014,7 @@ func ctlPlan(rest []string, execute bool, speaker *tts.Client) {
 			return
 		}
 		fmt.Println("no plan — the model found nothing it could do for that request")
-		say(speaker, "I found nothing I can do for that.")
+		say(speaker, phrase("nothing"))
 		return
 	}
 
@@ -1001,7 +1035,7 @@ func ctlPlan(rest []string, execute bool, speaker *tts.Client) {
 		for _, b := range blockers {
 			fmt.Fprintf(os.Stderr, "  - %s\n", b)
 		}
-		say(speaker, "That is not permitted.")
+		say(speaker, phrase("denied"))
 		os.Exit(1)
 	}
 
@@ -1028,22 +1062,22 @@ func ctlPlan(rest []string, execute bool, speaker *tts.Client) {
 			fmt.Printf("  [%d/%d] %s\n", i+1, n, run.Text)
 		case protocol.StatusDenied:
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): no longer permitted (state changed since preview)\n", i+1, n, s.Cap)
-			say(speaker, "I had to stop.")
+			say(speaker, phrase("stopped"))
 			os.Exit(1)
 		case protocol.StatusNeedsConfirm:
 			// The plan was approved as a whole, yet the daemon now wants a
 			// confirmation: a doom-loop tripped mid-plan. Stop rather than hammer.
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Text)
-			say(speaker, "I had to stop.")
+			say(speaker, phrase("stopped"))
 			os.Exit(1)
 		default:
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Error)
-			say(speaker, "I had to stop.")
+			say(speaker, phrase("stopped"))
 			os.Exit(1)
 		}
 	}
 	fmt.Println("plan done")
-	say(speaker, "Done.")
+	say(speaker, phrase("done"))
 }
 
 // reportRun prints the outcome of a single daemon run and exits nonzero on a

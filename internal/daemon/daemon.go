@@ -348,12 +348,12 @@ func (d *Daemon) reasonPlan(req protocol.Request) protocol.Response {
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("planning failed: %v", err)}
 	}
 	if len(plan.Steps) == 0 {
-		// A valid "nothing to do", not an error: planned with no steps — with a
-		// conversational Reply riding along when the request was talk.
-		if plan.Reply != "" {
-			d.emit(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, plan.Reply))
-		}
-		return protocol.Response{Status: protocol.StatusPlanned, Summary: plan.Summary, Reply: plan.Reply}
+		// The planner plans; it does not converse. An empty plan falls back to
+		// the intent layer, whose structural contract reliably separates talk
+		// from action — it may answer conversationally, or even rescue a
+		// single action the planner missed. Both outcomes stay inside the
+		// same allowlist and gate.
+		return d.fallbackToIntent(request, plan.Summary)
 	}
 	if err := plan.Validate(d.reg); err != nil {
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("invalid plan: %v", err)}
@@ -367,6 +367,38 @@ func (d *Daemon) reasonPlan(req protocol.Request) protocol.Response {
 		}
 	}
 	return protocol.Response{Status: protocol.StatusPlanned, Summary: plan.Summary, Plan: steps}
+}
+
+// fallbackToIntent handles a request the planner produced no steps for: the
+// intent layer decides whether it is conversation (Reply — words only, nothing
+// executes) or a single action the planner missed (returned as a one-step,
+// policy-bound plan). With neither, it is an honest no-match.
+func (d *Daemon) fallbackToIntent(request, summary string) protocol.Response {
+	if d.llm == nil {
+		return protocol.Response{Status: protocol.StatusPlanned, Summary: summary}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	intent, err := d.llm.Interpret(ctx, request, d.reg.List(), d.recent())
+	cancel()
+	if err != nil {
+		// The plan already answered "nothing to do"; a broken fallback must
+		// not turn that into a failure.
+		return protocol.Response{Status: protocol.StatusPlanned, Summary: summary}
+	}
+	if cap, err := core.ResolveIntent(d.reg, intent); err == nil {
+		return protocol.Response{
+			Status: protocol.StatusPlanned,
+			Plan: []protocol.PlanStep{{
+				Cap:      cap.ID(),
+				Args:     map[string]string(intent.Args),
+				Decision: d.evaluate(cap.ID()),
+			}},
+		}
+	}
+	if intent.Reply != "" {
+		d.emit(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, intent.Reply))
+	}
+	return protocol.Response{Status: protocol.StatusPlanned, Summary: summary, Reply: intent.Reply}
 }
 
 // evaluate asks the actor goroutine for the current policy decision on a

@@ -69,6 +69,13 @@ func envOr(key, fallback string) string {
 	return fallback
 }
 
+// spokenLanguage is the language for text that will be spoken aloud (plan
+// summaries). It should match the installed TTS voice — HYPRVALET_LANG and
+// HYPRVALET_VOICE are two halves of one choice.
+func spokenLanguage() string {
+	return envOr("HYPRVALET_LANG", "English")
+}
+
 // intentSchema constrains a single-capability reply to a typed intent.
 var intentSchema = json.RawMessage(`{
   "type": "object",
@@ -99,7 +106,7 @@ var planSchema = json.RawMessage(`{
       }
     }
   },
-  "required": ["steps", "reply"]
+  "required": ["steps"]
 }`)
 
 type chatMessage struct {
@@ -292,13 +299,8 @@ func buildPlanPrompt(caps []core.Capability, recent []core.Event) string {
 	b.WriteString("You turn a user's desktop request into an ordered plan of one or more capability calls from the list below.\n")
 	b.WriteString("Use as many steps as the request needs, in the order they should run, and fill each step's arguments.\n")
 	b.WriteString("Use only capability ids and argument names from the list. If the request cannot be done with these capabilities, return an empty steps array.\n")
-	b.WriteString("Also give a one-line summary of the plan, in English — it is spoken aloud to the user by an English voice. ")
-	b.WriteString("Each argument value is a plain string with no surrounding braces or quotes — a workspace is 3, not {3} or \"3\".\n")
-	b.WriteString("If the user greets, thanks, or asks a question instead of requesting actions, return an empty steps array ")
-	b.WriteString("and put one short sentence in the user's language in the reply field — it is spoken aloud. ")
-	b.WriteString("Answer only from what you see here; if you do not know something, say so. ")
-	b.WriteString("Whenever actions fit the request, prefer actions and leave reply empty.\n")
-	b.WriteString("\n")
+	fmt.Fprintf(&b, "Also give a one-line summary of the plan, in %s — it is spoken aloud to the user. ", spokenLanguage())
+	b.WriteString("Each argument value is a plain string with no surrounding braces or quotes — a workspace is 3, not {3} or \"3\".\n\n")
 	b.WriteString(capabilityList(caps))
 	b.WriteString(recentActions(recent, time.Now()))
 	return b.String()
