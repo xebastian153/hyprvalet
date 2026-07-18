@@ -62,34 +62,42 @@ var dangerousVerbs = map[string]bool{
 }
 
 // guardLifecycle refuses a recipe whose steps would restart or kill the host.
-// It is a conservative defense-in-depth safety net, not the permission boundary
-// (that is the policy gate). Lesson taken from hermes-agent's lifecycle guard.
 func (r Recipe) guardLifecycle() error {
-	for i, s := range r.Steps {
+	return checkLifecycle(r.Steps, fmt.Sprintf("recipe %q", r.Name))
+}
+
+// checkLifecycle refuses a sequence of steps that would restart or kill the
+// host — the agent process or the Hyprland session around it. It is shared by
+// recipes (installer-authored) and plans (model-generated): both must be unable
+// to wedge the machine in a restart loop. Conservative defense-in-depth, not the
+// permission boundary (that is the policy gate). Lesson from hermes-agent. The
+// kind argument ("recipe %q" / "plan") labels the error's source.
+func checkLifecycle(steps []Step, kind string) error {
+	for i, s := range steps {
 		for _, v := range s.Args {
 			low := strings.ToLower(v)
 			for _, f := range strings.Fields(low) {
 				if dangerousVerbs[f] {
-					return lifecycleErr(r.Name, i, s, v, f)
+					return lifecycleErr(kind, i, s, v, f)
 				}
 			}
 			// Referencing the agent binary itself, or telling the compositor to
-			// exit, are self-destruct paths a recipe must never contain.
+			// exit, are self-destruct paths a step must never contain.
 			if strings.Contains(low, "hyprvalet") {
-				return lifecycleErr(r.Name, i, s, v, "hyprvalet")
+				return lifecycleErr(kind, i, s, v, "hyprvalet")
 			}
 			if strings.Contains(low, "hyprctl") && strings.Contains(low, "exit") {
-				return lifecycleErr(r.Name, i, s, v, "hyprctl exit")
+				return lifecycleErr(kind, i, s, v, "hyprctl exit")
 			}
 		}
 	}
 	return nil
 }
 
-func lifecycleErr(recipe string, idx int, s Step, val, matched string) error {
+func lifecycleErr(kind string, idx int, s Step, val, matched string) error {
 	return fmt.Errorf(
-		"recipe %q step %d (%s): refused by lifecycle guard — argument %q may restart or kill hyprvalet's host (matched %q)",
-		recipe, idx+1, s.Capability, val, matched)
+		"%s step %d (%s): refused by lifecycle guard — argument %q may restart or kill hyprvalet's host (matched %q)",
+		kind, idx+1, s.Capability, val, matched)
 }
 
 // RecipeBook is the set of loaded recipes, keyed by name. Like the capability
