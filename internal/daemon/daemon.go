@@ -60,32 +60,51 @@ type Daemon struct {
 	rules   core.PolicyRules
 	planner core.PlannerPort // multi-step reasoning (ask/plan); read-only after New
 	llm     core.LLMPort     // single-intent reasoning (ask); read-only after New
+	events  core.EventStore  // audit log; may be nil (no auditing)
 	arm     core.ArmState
 	session core.SessionAllow
 	history []core.ActionRecord
-	mailbox chan command
-	log     *log.Logger
+	// historyPath is where executed actions are persisted so the one-shot CLI
+	// shares the daemon's recent-action world; empty means in-memory only.
+	historyPath string
+	mailbox     chan command
+	log         *log.Logger
 }
 
 // New builds a daemon, seeding its in-memory state from the persisted files so
 // it inherits the current arming and session grants. The reasoning ports (LLM
-// and planner) are injected so the core stays behind its interfaces; production
-// passes one Ollama client for both.
-func New(reg *core.Registry, rules core.PolicyRules, planner core.PlannerPort, llm core.LLMPort, logger *log.Logger) *Daemon {
+// and planner) and the audit store are injected so the core stays behind its
+// interfaces; production passes one Ollama client for both reasoning ports.
+func New(reg *core.Registry, rules core.PolicyRules, planner core.PlannerPort, llm core.LLMPort, events core.EventStore, logger *log.Logger) *Daemon {
 	now := time.Now()
 	arm, _ := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
 	session, _ := policyfile.LoadSessionAllow(policyfile.SessionAllowPath())
-	history, _ := policyfile.LoadActionLog(policyfile.ActionLogPath())
+	historyPath := policyfile.ActionLogPath()
+	history, _ := policyfile.LoadActionLog(historyPath)
 	return &Daemon{
-		reg:     reg,
-		rules:   rules,
-		planner: planner,
-		llm:     llm,
-		arm:     arm,
-		session: session,
-		history: core.PruneActions(history, now, core.DoomLoopWindow),
-		mailbox: make(chan command),
-		log:     logger,
+		reg:         reg,
+		rules:       rules,
+		planner:     planner,
+		llm:         llm,
+		events:      events,
+		arm:         arm,
+		session:     session,
+		history:     core.PruneActions(history, now, core.DoomLoopWindow),
+		historyPath: historyPath,
+		mailbox:     make(chan command),
+		log:         logger,
+	}
+}
+
+// emit appends one event to the audit log. Auditing is an observer, never a
+// gate: a failed append is logged and the action's outcome stands.
+func (d *Daemon) emit(kind core.EventKind, cap string, args core.Args, detail string) {
+	if d.events == nil {
+		return
+	}
+	e := core.Event{At: time.Now(), Source: "daemon", Kind: kind, Cap: cap, Args: args, Detail: detail}
+	if err := d.events.Append(e); err != nil {
+		d.log.Printf("warning: could not append audit event: %v", err)
 	}
 }
 
@@ -214,26 +233,38 @@ func (d *Daemon) handleRun(req protocol.Request) protocol.Response {
 	switch core.Decide(d.rules, d.arm, d.session, cap, now) {
 	case core.DecisionDeny:
 		// Absolute: approval cannot widen what the policy forbids.
+		d.emit(core.EventDenied, cap.ID(), args, "policy denies it")
 		return protocol.Response{Status: protocol.StatusDenied, Text: fmt.Sprintf("policy denies %q", cap.ID())}
 	case core.DecisionAsk:
 		if !req.Approved {
+			d.emit(core.EventNeedsConfirm, cap.ID(), args, "awaiting approval")
 			return protocol.Response{Status: protocol.StatusNeedsConfirm, Text: fmt.Sprintf("%q needs confirmation", cap.ID())}
 		}
 	}
 
 	sig := core.ActionSignature(cap.ID(), args)
 	if !req.Approved && core.IsDoomLoop(d.history, sig, now, core.DoomLoopWindow, core.DoomLoopThreshold) {
+		d.emit(core.EventNeedsConfirm, cap.ID(), args, "repeating action; awaiting approval")
 		return protocol.Response{Status: protocol.StatusNeedsConfirm, Text: fmt.Sprintf("%q is repeating; needs confirmation", cap.ID())}
 	}
 
 	out, err := cap.Run(context.Background(), args)
 	if err != nil {
+		d.emit(core.EventFailed, cap.ID(), args, err.Error())
 		return protocol.Response{Status: protocol.StatusError, Error: err.Error()}
 	}
 	d.history = append(d.history, core.ActionRecord{Signature: sig, At: now})
+	// Persist the history so the one-shot CLI's doom-loop check sees actions the
+	// daemon ran — the two planes share one recent-action world.
+	if d.historyPath != "" {
+		if err := policyfile.SaveActionLog(d.historyPath, d.history); err != nil {
+			d.log.Printf("warning: could not persist action history: %v", err)
+		}
+	}
 	if out == "" {
 		out = cap.ID() + " ok"
 	}
+	d.emit(core.EventRan, cap.ID(), args, out)
 	return protocol.Response{Status: protocol.StatusRan, Text: out}
 }
 

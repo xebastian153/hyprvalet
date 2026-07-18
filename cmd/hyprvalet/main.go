@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xebastian153/hyprvalet/internal/adapters/eventlog"
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
 	"github.com/xebastian153/hyprvalet/internal/adapters/ollama"
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
@@ -44,6 +45,18 @@ func buildRegistry() *core.Registry {
 		}
 	}
 	return reg
+}
+
+// events is the process-wide audit log. Auditing is an observer, never a gate:
+// a failed append warns and the action's outcome stands.
+var events = eventlog.New(eventlog.Path())
+
+// emitEvent records what became of one attempted capability call.
+func emitEvent(kind core.EventKind, cap string, args core.Args, detail string) {
+	e := core.Event{At: time.Now(), Source: "cli", Kind: kind, Cap: cap, Args: args, Detail: detail}
+	if err := events.Append(e); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not append audit event: %v\n", err)
+	}
 }
 
 func main() {
@@ -75,6 +88,8 @@ func main() {
 		disarmCap(reg, args[1])
 	case "recipe":
 		recipeCmd(reg, rules, args[1:])
+	case "log":
+		logCmd(args[1:])
 	case "ask":
 		askCmd(reg, rules, args[1:])
 	case "plan":
@@ -116,6 +131,7 @@ func usage() {
 	fmt.Println("  hyprvalet recipe list                list recipes")
 	fmt.Println("  hyprvalet recipe show <name>         preview a recipe's steps")
 	fmt.Println("  hyprvalet recipe run <name>          run a recipe (each step is still gated)")
+	fmt.Println("  hyprvalet log [count]                show the audit trail (attempted actions + outcomes)")
 	fmt.Println("  hyprvalet ask \"<request>\"            map natural language to one capability (local LLM)")
 	fmt.Println("  hyprvalet plan \"<request>\"           preview a multi-step plan without running it")
 	fmt.Println("  hyprvalet do \"<request>\"             plan, confirm once, then execute step by step")
@@ -174,14 +190,12 @@ func runCap(reg *core.Registry, rules core.PolicyRules, id string, rest []string
 		return
 	}
 
-	out, err := cap.Run(context.Background(), args)
+	out, err := execCap(cap, args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	if out != "" {
-		fmt.Println(out)
-	}
+	fmt.Println(out)
 }
 
 // gateResult is the outcome of evaluating the permission policy for one call.
@@ -259,8 +273,10 @@ func gate(cap core.Capability, args core.Args, dc *decisionCtx) gateResult {
 			fmt.Fprintf(os.Stderr,
 				"denied: %q requires arming — run 'hyprvalet arm %s' to grant %s\n",
 				cap.ID(), cap.ID(), dc.rules.ArmFor(cap))
+			emitEvent(core.EventDenied, cap.ID(), args, "requires arming")
 		} else {
 			fmt.Fprintf(os.Stderr, "denied by policy: %q\n", cap.ID())
+			emitEvent(core.EventDenied, cap.ID(), args, "policy denies it")
 		}
 		return gateDenied
 	case core.DecisionAsk:
@@ -273,6 +289,7 @@ func gate(cap core.Capability, args core.Args, dc *decisionCtx) gateResult {
 		case answerOnce:
 			// proceed
 		default:
+			emitEvent(core.EventDeclined, cap.ID(), args, "human declined")
 			return gateDeclined
 		}
 	}
@@ -285,11 +302,27 @@ func gate(cap core.Capability, args core.Args, dc *decisionCtx) gateResult {
 		fmt.Fprintf(os.Stderr, "warning: %q is repeating — %d+ identical calls (this one included) in the last %s\n",
 			cap.ID(), core.DoomLoopThreshold, core.DoomLoopWindow)
 		if !promptYes("run it again anyway?") {
+			emitEvent(core.EventDeclined, cap.ID(), args, "human declined repeating action")
 			return gateDeclined
 		}
 	}
 	dc.recordAction(sig)
 	return gateProceed
+}
+
+// execCap runs an already-gated capability and audits the outcome. Every CLI
+// execution path funnels here so nothing runs without leaving an event behind.
+func execCap(cap core.Capability, args core.Args) (string, error) {
+	out, err := cap.Run(context.Background(), args)
+	if err != nil {
+		emitEvent(core.EventFailed, cap.ID(), args, err.Error())
+		return "", err
+	}
+	if out == "" {
+		out = cap.ID() + " ok"
+	}
+	emitEvent(core.EventRan, cap.ID(), args, out)
+	return out, nil
 }
 
 type decisionAnswer int
@@ -472,13 +505,10 @@ func runRecipe(reg *core.Registry, rules core.PolicyRules, r core.Recipe) {
 			fmt.Fprintf(os.Stderr, "recipe %q aborted at step %d/%d (%s)\n", r.Name, i+1, n, s.Capability)
 			os.Exit(1)
 		}
-		out, err := cap.Run(context.Background(), s.Args)
+		out, err := execCap(cap, s.Args)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "recipe %q failed at step %d/%d (%s): %v\n", r.Name, i+1, n, s.Capability, err)
 			os.Exit(1)
-		}
-		if out == "" {
-			out = s.Capability + " ok"
 		}
 		fmt.Printf("  [%d/%d] %s\n", i+1, n, out)
 	}
@@ -527,14 +557,12 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 		return
 	}
 
-	out, err := cap.Run(context.Background(), intent.Args)
+	out, err := execCap(cap, intent.Args)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
-	if out != "" {
-		fmt.Println(out)
-	}
+	fmt.Println(out)
 }
 
 // planCmd runs the M3 planner. With execute=false ("plan") it previews only;
@@ -614,16 +642,14 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 		// A grant that expired between approval and now (e.g. an arming window)
 		// blocks the step instead of slipping through on the stale approval.
 		if core.Decide(dc.rules, dc.arm, dc.session, cap, time.Now()) == core.DecisionDeny {
+			emitEvent(core.EventDenied, cap.ID(), s.Args, "state changed since plan approval")
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): no longer permitted (state changed since approval)\n", i+1, n, s.Capability)
 			os.Exit(1)
 		}
-		out, err := cap.Run(context.Background(), s.Args)
+		out, err := execCap(cap, s.Args)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "plan failed at step %d/%d (%s): %v\n", i+1, n, s.Capability, err)
 			os.Exit(1)
-		}
-		if out == "" {
-			out = s.Capability + " ok"
 		}
 		fmt.Printf("  [%d/%d] %s\n", i+1, n, out)
 	}
@@ -650,10 +676,39 @@ func daemonCmd(reg *core.Registry, rules core.PolicyRules) {
 
 	// One Ollama client serves both reasoning ports (LLMPort + PlannerPort).
 	llm := ollama.Default()
-	d := daemon.New(reg, rules, llm, llm, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
+	d := daemon.New(reg, rules, llm, llm, events, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
 	if err := d.Run(ctx, ln); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
 		os.Exit(1)
+	}
+}
+
+// logCmd shows the audit trail: the most recent attempted actions and what
+// became of each, newest last. Default 20; `hyprvalet log 100` shows more.
+func logCmd(rest []string) {
+	n := 20
+	if len(rest) > 0 {
+		if _, err := fmt.Sscanf(rest[0], "%d", &n); err != nil || n <= 0 {
+			fmt.Fprintf(os.Stderr, "usage: hyprvalet log [count]\n")
+			os.Exit(2)
+		}
+	}
+	list, err := events.Tail(n)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error reading event log: %v\n", err)
+		os.Exit(1)
+	}
+	if len(list) == 0 {
+		fmt.Println("no events yet")
+		return
+	}
+	for _, e := range list {
+		detail := e.Detail
+		if len(detail) > 60 {
+			detail = detail[:57] + "..."
+		}
+		fmt.Printf("%s  %-6s  %-13s  %-28s %s  %s\n",
+			e.At.Local().Format("2006-01-02 15:04:05"), e.Source, e.Kind, e.Cap, formatArgs(e.Args), detail)
 	}
 }
 

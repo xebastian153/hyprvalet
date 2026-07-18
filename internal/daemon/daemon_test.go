@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/core"
 	"github.com/xebastian153/hyprvalet/internal/protocol"
 )
@@ -69,6 +70,16 @@ type fakeLLM struct {
 
 func (f fakeLLM) Interpret(context.Context, string, []core.Capability) (core.Intent, error) {
 	return f.intent, f.err
+}
+
+// fakeEvents is an in-memory core.EventStore capturing what the daemon audits.
+type fakeEvents struct {
+	events []core.Event
+}
+
+func (f *fakeEvents) Append(e core.Event) error { f.events = append(f.events, e); return nil }
+func (f *fakeEvents) Tail(int) ([]core.Event, error) {
+	return f.events, nil
 }
 
 // runDaemon starts a daemon on a fresh temp socket and returns its path; the
@@ -321,6 +332,55 @@ func TestReasonPlanEmptyIsNotAnError(t *testing.T) {
 	}
 	if resp.Status != protocol.StatusPlanned || len(resp.Plan) != 0 {
 		t.Fatalf("empty plan = %+v", resp)
+	}
+}
+
+func TestHandleRunAuditsOutcomes(t *testing.T) {
+	rule := func(d core.Decision) core.PolicyRules {
+		return core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: d}}}
+	}
+	tests := []struct {
+		name  string
+		rules core.PolicyRules
+		req   protocol.Request
+		want  core.EventKind
+	}{
+		{"ran is audited", rule(core.DecisionAllow), protocol.Request{Op: protocol.OpRun, Cap: "a.b"}, core.EventRan},
+		{"denial is audited", rule(core.DecisionDeny), protocol.Request{Op: protocol.OpRun, Cap: "a.b"}, core.EventDenied},
+		{"needs_confirm is audited", rule(core.DecisionAsk), protocol.Request{Op: protocol.OpRun, Cap: "a.b"}, core.EventNeedsConfirm},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			d := testDaemon(t, tt.rules, demoCap{id: "a.b"})
+			fe := &fakeEvents{}
+			d.events = fe
+			d.handle(tt.req)
+			if len(fe.events) != 1 || fe.events[0].Kind != tt.want {
+				t.Fatalf("audited %+v, want one %q event", fe.events, tt.want)
+			}
+			if fe.events[0].Source != "daemon" || fe.events[0].Cap != "a.b" {
+				t.Fatalf("event = %+v", fe.events[0])
+			}
+		})
+	}
+}
+
+func TestHandleRunPersistsHistory(t *testing.T) {
+	allow := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAllow}}}
+	d := testDaemon(t, allow, demoCap{id: "a.b"})
+	d.historyPath = filepath.Join(t.TempDir(), "actions.json")
+
+	if resp := d.handle(protocol.Request{Op: protocol.OpRun, Cap: "a.b"}); resp.Status != protocol.StatusRan {
+		t.Fatalf("run = %+v", resp)
+	}
+	// The one-shot CLI must see the daemon's action: it is persisted, not
+	// memory-only — the two planes share one recent-action world.
+	saved, err := policyfile.LoadActionLog(d.historyPath)
+	if err != nil {
+		t.Fatalf("loading persisted history: %v", err)
+	}
+	if len(saved) != 1 || saved[0].Signature != core.ActionSignature("a.b", nil) {
+		t.Fatalf("persisted history = %+v", saved)
 	}
 }
 
