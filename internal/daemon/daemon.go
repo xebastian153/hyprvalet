@@ -159,11 +159,12 @@ func (d *Daemon) handle(req protocol.Request) protocol.Response {
 	}
 }
 
-// handleRun runs one capability, but only if it is permitted with no human in
-// the loop. A resident daemon must never auto-run something that needs
-// confirmation, so anything but a clean Allow (and no doom-loop) is refused with
-// a status the client can act on. Interactive confirmation over the socket is a
-// later slice.
+// handleRun runs one capability. A resident daemon must never auto-run something
+// that needs a human, so an unapproved Ask or doom-loop is refused with a
+// needs_confirm the client can act on. The client obtains approval and re-sends
+// with Approved set; the daemon re-evaluates (so a state change since the prompt
+// still blocks) and runs. Approval lets an Ask or doom-loop through but never
+// overrides a policy Deny.
 func (d *Daemon) handleRun(req protocol.Request) protocol.Response {
 	cap, ok := d.reg.Get(req.Cap)
 	if !ok {
@@ -174,13 +175,16 @@ func (d *Daemon) handleRun(req protocol.Request) protocol.Response {
 
 	switch core.Decide(d.rules, d.arm, d.session, cap, now) {
 	case core.DecisionDeny:
+		// Absolute: approval cannot widen what the policy forbids.
 		return protocol.Response{Status: protocol.StatusDenied, Text: fmt.Sprintf("policy denies %q", cap.ID())}
 	case core.DecisionAsk:
-		return protocol.Response{Status: protocol.StatusNeedsConfirm, Text: fmt.Sprintf("%q needs confirmation", cap.ID())}
+		if !req.Approved {
+			return protocol.Response{Status: protocol.StatusNeedsConfirm, Text: fmt.Sprintf("%q needs confirmation", cap.ID())}
+		}
 	}
 
 	sig := core.ActionSignature(cap.ID(), args)
-	if core.IsDoomLoop(d.history, sig, now, core.DoomLoopWindow, core.DoomLoopThreshold) {
+	if !req.Approved && core.IsDoomLoop(d.history, sig, now, core.DoomLoopWindow, core.DoomLoopThreshold) {
 		return protocol.Response{Status: protocol.StatusNeedsConfirm, Text: fmt.Sprintf("%q is repeating; needs confirmation", cap.ID())}
 	}
 

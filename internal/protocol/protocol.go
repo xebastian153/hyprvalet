@@ -20,6 +20,12 @@ type Request struct {
 	Op   Op                `json:"op"`
 	Cap  string            `json:"cap,omitempty"`
 	Args map[string]string `json:"args,omitempty"`
+	// Approved is set on the follow-up a client sends after a needs_confirm
+	// reply: the human said yes. It lets an Ask-tier action (or a doom-loop) run,
+	// but never overrides a policy Deny — approval widens nothing the policy
+	// forbids. The daemon re-evaluates on the approved call, so a world that
+	// changed since the prompt still blocks.
+	Approved bool `json:"approved,omitempty"`
 }
 
 // Status is the outcome class of a response, so a client can branch without

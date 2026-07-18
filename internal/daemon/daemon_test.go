@@ -108,6 +108,89 @@ func TestDoomLoopRefusesToAutoRun(t *testing.T) {
 	}
 }
 
+func TestHandleRunApproved(t *testing.T) {
+	rule := func(d core.Decision) core.PolicyRules {
+		return core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: d}}}
+	}
+
+	t.Run("approval lets an Ask run", func(t *testing.T) {
+		ran := false
+		d := testDaemon(t, rule(core.DecisionAsk), demoCap{id: "a.b", ran: &ran})
+		resp := d.handle(protocol.Request{Op: protocol.OpRun, Cap: "a.b", Approved: true})
+		if resp.Status != protocol.StatusRan || !ran {
+			t.Fatalf("approved ask = %+v ran=%v", resp, ran)
+		}
+	})
+
+	t.Run("approval never overrides a Deny", func(t *testing.T) {
+		ran := false
+		d := testDaemon(t, rule(core.DecisionDeny), demoCap{id: "a.b", ran: &ran})
+		resp := d.handle(protocol.Request{Op: protocol.OpRun, Cap: "a.b", Approved: true})
+		if resp.Status != protocol.StatusDenied || ran {
+			t.Fatalf("approved deny = %+v ran=%v (approval must not widen policy)", resp, ran)
+		}
+	})
+
+	t.Run("approval runs through a doom-loop", func(t *testing.T) {
+		ran := false
+		d := testDaemon(t, rule(core.DecisionAllow), demoCap{id: "a.b", ran: &ran})
+		sig := core.ActionSignature("a.b", nil)
+		now := time.Now()
+		for i := 0; i < core.DoomLoopThreshold-1; i++ {
+			d.history = append(d.history, core.ActionRecord{Signature: sig, At: now})
+		}
+		resp := d.handle(protocol.Request{Op: protocol.OpRun, Cap: "a.b", Approved: true})
+		if resp.Status != protocol.StatusRan || !ran {
+			t.Fatalf("approved doom-loop = %+v ran=%v", resp, ran)
+		}
+	})
+}
+
+// serveDaemon starts a daemon on a fresh temp socket and returns its path. The
+// daemon and its socket are torn down when the test ends.
+func serveDaemon(t *testing.T, rules core.PolicyRules, ran *bool) string {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "d.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	d := testDaemon(t, rules, demoCap{id: "a.b", ran: ran})
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); ln.Close() })
+	go func() { _ = d.Run(ctx, ln) }()
+	return socket
+}
+
+func TestRunViaDaemonConfirmation(t *testing.T) {
+	askRule := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAsk}}}
+
+	t.Run("yes runs it over the socket", func(t *testing.T) {
+		ran := false
+		socket := serveDaemon(t, askRule, &ran)
+		asked := false
+		resp, err := RunViaDaemon(socket, "a.b", nil, func(string) bool { asked = true; return true })
+		if err != nil {
+			t.Fatalf("RunViaDaemon: %v", err)
+		}
+		if !asked || resp.Status != protocol.StatusRan || !ran {
+			t.Fatalf("asked=%v resp=%+v ran=%v", asked, resp, ran)
+		}
+	})
+
+	t.Run("no declines without running", func(t *testing.T) {
+		ran := false
+		socket := serveDaemon(t, askRule, &ran)
+		resp, err := RunViaDaemon(socket, "a.b", nil, func(string) bool { return false })
+		if err != nil {
+			t.Fatalf("RunViaDaemon: %v", err)
+		}
+		if resp.Status != protocol.StatusDenied || ran {
+			t.Fatalf("declined: resp=%+v ran=%v", resp, ran)
+		}
+	})
+}
+
 func TestSocketRoundTrip(t *testing.T) {
 	socket := filepath.Join(t.TempDir(), "d.sock")
 	ln, err := net.Listen("unix", socket)
