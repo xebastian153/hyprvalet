@@ -35,6 +35,11 @@ const (
 	thresholdFactor = 3.5
 	thresholdMin    = 260
 	loudAmbient     = 1200
+
+	// stallTimeout: pw-record delivers a frame every ~30ms; three seconds of
+	// nothing means the recorder has wedged, and the turn must end rather than
+	// hang the whole session.
+	stallTimeout = 3 * time.Second
 )
 
 // ListenOnce blocks until one spoken utterance is captured, then writes it as
@@ -68,25 +73,50 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 		return fmt.Errorf("reading stream header: %w", err)
 	}
 
+	// Read frames in a goroutine feeding a channel, so a stalled recorder — one
+	// that stops delivering bytes without closing the pipe — cannot block the
+	// loop forever the way a bare io.ReadFull would. The loop selects the next
+	// frame against the context, the idle deadline, AND a stall watchdog.
+	frames := make(chan []byte, 4)
+	readErr := make(chan error, 1)
+	go func() {
+		for {
+			buf := make([]byte, frameBytes)
+			if _, err := io.ReadFull(stdout, buf); err != nil {
+				readErr <- err
+				return
+			}
+			select {
+			case frames <- buf:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
 	frame := make([]byte, frameBytes)
 	readFrame := func() error {
-		_, err := io.ReadFull(stdout, frame)
-		if err != nil && ctx.Err() != nil {
-			// Cancellation kills the recorder and the pipe EOFs — the context
-			// is the real story, not the broken read.
+		select {
+		case buf := <-frames:
+			copy(frame, buf)
+			return nil
+		case err := <-readErr:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return err
+		case <-ctx.Done():
 			return ctx.Err()
+		case <-time.After(stallTimeout):
+			return fmt.Errorf("the microphone stopped delivering audio")
 		}
-		return err
 	}
 
 	// Calibrate: learn the room before listening for a voice.
 	var ambient float64
 	for i := 0; i < calibrateFrames; i++ {
 		if err := readFrame(); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("calibrating: %w", err)
+			return err
 		}
 		ambient += frameRMS(frame)
 	}
@@ -113,10 +143,7 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 			return ctx.Err()
 		}
 		if err := readFrame(); err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			return fmt.Errorf("reading audio: %w", err)
+			return err
 		}
 		// Idle only governs the silence BEFORE speech begins; once an utterance
 		// is underway it always finishes. Time is counted in frames read, so it
