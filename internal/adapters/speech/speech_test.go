@@ -45,3 +45,21 @@ func TestChainAllFailingReportsAll(t *testing.T) {
 		t.Fatalf("err = %v, want both causes", err)
 	}
 }
+
+func TestChainStopsOnCancelNoReplay(t *testing.T) {
+	// A cancelled context is an interruption, not a failure: the chain must
+	// NOT fall through and replay the words on the next backend.
+	spokeSecond := false
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c := NewChain(
+		canned{err: context.Canceled},
+		canned{spoke: &spokeSecond},
+	)
+	if err := c.Speak(ctx, "hi"); err == nil {
+		t.Fatal("cancelled chain must return an error, not success")
+	}
+	if spokeSecond {
+		t.Fatal("a barge-in must not replay the words on the fallback backend")
+	}
+}

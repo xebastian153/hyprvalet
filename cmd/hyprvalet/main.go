@@ -922,43 +922,106 @@ func voiceCmd() {
 		defer exec.Command("systemctl", "--user", "start", "hyprvalet-listen").Run()
 	}
 
-	speaker := animated{speakerChain()}
-	confirm := func(question string) bool { return voiceConfirm(ctx, speaker, question, wav) }
+	// The plain speaker voices confirmations (which listen right after, so they
+	// must not also barge-listen). Replies go through the barge speaker when
+	// interruption is enabled, so the assistant can be talked over; a barge
+	// leaves the user's words in `pending` for the next turn.
+	plain := animated{speakerChain()}
+	var pending string
+	var speaker speech.Speaker = plain
+	if bargeEnabled() {
+		speaker = &bargeSpeaker{inner: plain, ctx: ctx, wav: wav, pending: &pending}
+	}
+	confirm := func(question string) bool { return voiceConfirm(ctx, plain, question, wav) }
 	idle := idleTimeout()
 
 	banner("Hablá cuando quieras — sin repetir el nombre. Decí \"chau\" o cerrá la ventana para salir.")
 
-	// The command spoken in the same breath as the wake word arrives here, so
-	// the very first thing you said is served before we listen for the next.
-	if first := strings.TrimSpace(os.Getenv("HYPRVALET_FIRST")); first != "" {
-		fmt.Printf("heard: %s\n", first)
-		if !farewells[normalizeUtterance(first)] {
-			processTurn(first, speaker, confirm)
-			fmt.Println()
-		}
-	}
+	// The command spoken with the wake word arrives via HYPRVALET_FIRST.
+	pending = strings.TrimSpace(os.Getenv("HYPRVALET_FIRST"))
 
 	for {
-		text, res := listenAndTranscribe(ctx, wav, false, idle)
-		switch res {
-		case listenCancel:
-			return // Ctrl+C or the window closed
-		case listenIdle:
-			say(speaker, phrase("bye")) // fell silent — bow out
-			return
-		case listenNone:
-			continue // a failed turn never ends the session
+		var text string
+		if pending != "" {
+			// Either the wake-word command, or what the user said while talking
+			// over the assistant — serve it without listening anew.
+			text, pending = pending, ""
+		} else {
+			t, res := listenAndTranscribe(ctx, wav, false, idle)
+			switch res {
+			case listenCancel:
+				return // Ctrl+C or the window closed
+			case listenIdle:
+				say(plain, phrase("bye")) // fell silent — bow out
+				return
+			case listenNone:
+				continue // a failed turn never ends the session
+			}
+			text = t
 		}
 		fmt.Printf("heard: %s\n", text)
 
 		if farewells[normalizeUtterance(text)] {
-			say(speaker, phrase("bye"))
+			say(plain, phrase("bye"))
 			return
 		}
 
 		processTurn(text, speaker, confirm)
 		fmt.Println()
 	}
+}
+
+// bargeSpeaker makes the assistant interruptible: while it speaks, it listens,
+// and the instant the user talks over it the speech stops and their words are
+// captured for the next turn. This is clean ONLY on headphones — through
+// speakers the microphone would hear the assistant's own voice and interrupt
+// itself; that case needs echo cancellation. Enabled by HYPRVALET_BARGE_IN.
+type bargeSpeaker struct {
+	inner   speech.Speaker
+	ctx     context.Context
+	wav     string
+	pending *string
+}
+
+func (b *bargeSpeaker) Speak(_ context.Context, text string) error {
+	speakCtx, cancelSpeak := context.WithCancel(b.ctx)
+	defer cancelSpeak()
+	bargeCtx, cancelBarge := context.WithCancel(b.ctx)
+	defer cancelBarge()
+
+	captured := make(chan string, 1)
+	go func() {
+		// Fire cancelSpeak the moment speech begins — the assistant falls
+		// silent — then finish capturing what the user said.
+		if err := mic.ListenOnce(bargeCtx, b.wav, 0, cancelSpeak); err != nil {
+			captured <- ""
+			return
+		}
+		tctx, cancel := context.WithTimeout(b.ctx, 60*time.Second)
+		txt, _ := whisper.Default().Transcribe(tctx, b.wav)
+		cancel()
+		captured <- strings.TrimSpace(txt)
+	}()
+
+	err := b.inner.Speak(speakCtx, text)
+
+	if speakCtx.Err() != nil { // barged: the user talked over the assistant
+		fmt.Println("\r\x1b[K\x1b[2m(te escucho…)\x1b[0m")
+		if txt := <-captured; txt != "" && b.pending != nil {
+			*b.pending = txt
+		}
+		return nil
+	}
+	cancelBarge()
+	<-captured
+	return err
+}
+
+// bargeEnabled reports whether interrupt-while-speaking is on (HYPRVALET_BARGE_IN).
+// Off by default: it is correct only on headphones.
+func bargeEnabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("HYPRVALET_BARGE_IN")))
+	return v == "1" || v == "true" || v == "yes"
 }
 
 // processTurn routes one transcribed utterance through the reasoned, gated
@@ -996,7 +1059,7 @@ func listenAndTranscribe(ctx context.Context, wav string, quiet bool, idle time.
 		status("listening", "hablá cuando quieras")
 	}
 	clearWave := listeningWave()
-	err := mic.ListenOnce(ctx, wav, idle)
+	err := mic.ListenOnce(ctx, wav, idle, nil)
 	clearWave()
 	if ctx.Err() != nil {
 		return "", listenCancel

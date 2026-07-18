@@ -27,15 +27,23 @@ func NewChain(speakers ...Speaker) *Chain {
 }
 
 // Speak satisfies Speaker: the first backend that speaks wins; when all fail,
-// every cause is reported.
+// every cause is reported. A cancelled context stops the chain immediately —
+// it is an interruption (barge-in), not a backend failure, so the next backend
+// must NOT replay the same words.
 func (c *Chain) Speak(ctx context.Context, text string) error {
 	var errs []error
 	for _, s := range c.speakers {
-		if err := s.Speak(ctx, text); err == nil {
-			return nil
-		} else {
-			errs = append(errs, err)
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
+		err := s.Speak(ctx, text)
+		if err == nil {
+			return nil
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		errs = append(errs, err)
 	}
 	if len(errs) == 0 {
 		return fmt.Errorf("no speech backends configured")

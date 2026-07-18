@@ -20,7 +20,7 @@ func TestListenOnceIdle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	err := ListenOnce(ctx, filepath.Join(t.TempDir(), "u.wav"), time.Second)
+	err := ListenOnce(ctx, filepath.Join(t.TempDir(), "u.wav"), time.Second, nil)
 	if !errors.Is(err, ErrIdle) {
 		t.Fatalf("silent-room ListenOnce(idle=1s) = %v, want ErrIdle", err)
 	}

@@ -52,7 +52,11 @@ const (
 // the threshold adapts to the room as it is right now. Returns ctx.Err() when
 // cancelled. If idle > 0 and no speech begins within it, returns ErrIdle —
 // once an utterance starts, idle no longer applies; it always finishes.
-func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
+//
+// onStart, if non-nil, fires once the instant speech begins — before the
+// utterance finishes — which is what lets a caller stop the assistant's own
+// voice the moment the user talks over it (barge-in).
+func ListenOnce(ctx context.Context, wavPath string, idle time.Duration, onStart func()) error {
 	args := []string{"--rate", "16000", "--channels", "1", "--format", "s16"}
 	if target := defaultSource(); target != "" {
 		args = append(args, "--target", target)
@@ -184,6 +188,9 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 
 		switch det.feed(rms) {
 		case vadStart:
+			if onStart != nil {
+				onStart()
+			}
 			// The trigger frames themselves live in the pre-roll; keep it all.
 			for _, f := range preRoll {
 				utterance = append(utterance, f...)
