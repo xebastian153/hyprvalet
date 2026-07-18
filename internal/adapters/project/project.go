@@ -70,11 +70,22 @@ func resolve(rawName string) (slug, dir string, err error) {
 	return slug, filepath.Join(baseDir(), slug), nil
 }
 
-// openClaude launches a terminal in dir running Claude Code, fire-and-forget:
-// the editor session outlives the turn, so the process is detached from the
-// request and reaped in the background.
-func openClaude(dir string) error {
-	cmd := exec.Command(terminalCmd(), "--working-directory", dir, "-e", claudeCmd())
+// SessionPrefix names the tmux sessions that host Claude Code, one per project.
+// Running Claude inside tmux is what lets the assistant read the terminal back
+// (tmux capture-pane); the prefix lets it find those sessions among any others.
+const SessionPrefix = "hyprvalet-"
+
+// SessionFor is the tmux session name for a project slug.
+func SessionFor(slug string) string { return SessionPrefix + slug }
+
+// openClaude launches a terminal running Claude Code inside a named tmux
+// session (so the terminal is readable later), fire-and-forget: the editor
+// outlives the turn, so the process is detached from the request and reaped in
+// the background. tmux new-session -A attaches to the session if it already
+// exists, so reopening a project returns to the same running Claude.
+func openClaude(slug, dir string) error {
+	cmd := exec.Command(terminalCmd(), "--working-directory", dir, "-e",
+		"tmux", "new-session", "-A", "-s", SessionFor(slug), "-c", dir, claudeCmd())
 	cmd.Stdout, cmd.Stderr = nil, nil
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("opening Claude Code: %w", err)
@@ -104,7 +115,7 @@ func (newProject) Run(_ context.Context, args core.Args) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating project folder: %w", err)
 	}
-	if err := openClaude(dir); err != nil {
+	if err := openClaude(slug, dir); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("created project %q and opened Claude Code", slug), nil
@@ -126,7 +137,7 @@ func (openProject) Run(_ context.Context, args core.Args) (string, error) {
 	if info, statErr := os.Stat(dir); statErr != nil || !info.IsDir() {
 		return "", core.Validationf("no project named %q under %s", slug, baseDir())
 	}
-	if err := openClaude(dir); err != nil {
+	if err := openClaude(slug, dir); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf("opened Claude Code in project %q", slug), nil
