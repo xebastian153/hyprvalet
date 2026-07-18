@@ -1088,9 +1088,10 @@ func terminalContext(ctx context.Context, text string) (string, bool) {
 		return "", false
 	}
 	aug := fmt.Sprintf(
-		"The Claude Code terminal currently shows the following:\n---\n%s\n---\n"+
-			"Answer the user's question about what is happening there, briefly and in their language. "+
-			"User: %s", content, text)
+		"This is the LIVE content of the Claude Code terminal right now:\n---\n%s\n---\n"+
+			"Answer the user's question STRICTLY from this content — never from anything you "+
+			"remember from earlier, which may be stale. If it does not contain the answer, say "+
+			"plainly what you can see. Be brief, in the user's language.\nUser: %s", content, text)
 	return aug, true
 }
 
