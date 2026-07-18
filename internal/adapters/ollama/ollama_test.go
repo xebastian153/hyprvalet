@@ -12,8 +12,11 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
-// Compile-time proof the client satisfies the reasoning port.
-var _ core.LLMPort = (*Client)(nil)
+// Compile-time proof the client satisfies both reasoning ports.
+var (
+	_ core.LLMPort     = (*Client)(nil)
+	_ core.PlannerPort = (*Client)(nil)
+)
 
 // mockOllama returns a server that replies with the given message content as an
 // Ollama /api/chat response, and captures the request body for assertions.
@@ -89,16 +92,68 @@ func TestInterpretBadContent(t *testing.T) {
 	}
 }
 
-func TestBuildSystemPromptListsCapabilities(t *testing.T) {
-	reg := core.NewRegistry()
-	// A tiny fake capability just to check the prompt lists ids and params.
-	prompt := buildSystemPrompt([]core.Capability{promptCap{}})
-	_ = reg
-	if !strings.Contains(prompt, "demo.thing") {
-		t.Error("prompt should list the capability id")
+func TestPromptsListCapabilities(t *testing.T) {
+	caps := []core.Capability{promptCap{}}
+	for _, tt := range []struct {
+		name   string
+		prompt string
+	}{
+		{"intent prompt", buildIntentPrompt(caps)},
+		{"plan prompt", buildPlanPrompt(caps)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if !strings.Contains(tt.prompt, "demo.thing") {
+				t.Error("prompt should list the capability id")
+			}
+			if !strings.Contains(tt.prompt, "widget") {
+				t.Error("prompt should list the capability params")
+			}
+		})
 	}
-	if !strings.Contains(prompt, "widget") {
-		t.Error("prompt should list the capability params")
+}
+
+func TestPlanParsesSteps(t *testing.T) {
+	var got chatRequest
+	content := `{"summary":"set up work","steps":[` +
+		`{"capability":"workspace.switch","args":{"workspace":"2"}},` +
+		`{"capability":"app.open","args":{"cmd":"code"}}]}`
+	ts := mockOllama(t, content, &got)
+	defer ts.Close()
+
+	plan, err := New(ts.URL, "m").Plan(context.Background(), "set up my work env", nil)
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if plan.Summary != "set up work" {
+		t.Errorf("summary = %q", plan.Summary)
+	}
+	if len(plan.Steps) != 2 {
+		t.Fatalf("got %d steps, want 2", len(plan.Steps))
+	}
+	if plan.Steps[0].Capability != "workspace.switch" || plan.Steps[0].Args["workspace"] != "2" {
+		t.Errorf("step 0 wrong: %+v", plan.Steps[0])
+	}
+	if plan.Steps[1].Capability != "app.open" || plan.Steps[1].Args["cmd"] != "code" {
+		t.Errorf("step 1 wrong: %+v", plan.Steps[1])
+	}
+	if plan.Request != "set up my work env" {
+		t.Errorf("request not preserved: %q", plan.Request)
+	}
+	if len(got.Format) == 0 {
+		t.Error("plan request must include a structured-output format")
+	}
+}
+
+func TestPlanEmptyStepsIsNotError(t *testing.T) {
+	ts := mockOllama(t, `{"summary":"cannot do that","steps":[]}`, nil)
+	defer ts.Close()
+
+	plan, err := New(ts.URL, "m").Plan(context.Background(), "brew coffee", nil)
+	if err != nil {
+		t.Fatalf("empty plan must not error: %v", err)
+	}
+	if len(plan.Steps) != 0 {
+		t.Fatalf("expected 0 steps, got %d", len(plan.Steps))
 	}
 }
 
