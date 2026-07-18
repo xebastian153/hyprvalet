@@ -389,6 +389,26 @@ func TestHandleRunPersistsHistory(t *testing.T) {
 	}
 }
 
+func TestReasonAskConversationalReply(t *testing.T) {
+	d := testDaemon(t, core.PolicyRules{}, demoCap{id: "a.b"})
+	d.llm = fakeLLM{intent: core.Intent{Reply: "I can control your desktop."}}
+	fe := &fakeEvents{}
+	d.events = fe
+	socket := runDaemon(t, d)
+
+	resp, err := AskViaDaemon(socket, "what can you do?", false)
+	if err != nil {
+		t.Fatalf("AskViaDaemon: %v", err)
+	}
+	if resp.Status != protocol.StatusPlanned || len(resp.Plan) != 0 || resp.Reply != "I can control your desktop." {
+		t.Fatalf("conversational ask = %+v, want planned, no steps, the reply", resp)
+	}
+	// The exchange must join the episodic history so later turns can refer to it.
+	if len(fe.events) != 1 || fe.events[0].Kind != core.EventReplied {
+		t.Fatalf("audited %+v, want one replied event", fe.events)
+	}
+}
+
 func TestReasonAskEscalatesToStrongModel(t *testing.T) {
 	allow := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAllow}}}
 	d := testDaemon(t, allow, demoCap{id: "a.b"})

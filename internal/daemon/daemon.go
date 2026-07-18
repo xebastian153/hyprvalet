@@ -312,9 +312,13 @@ func (d *Daemon) reasonAsk(req protocol.Request) protocol.Response {
 	}
 	cap, err := core.ResolveIntent(d.reg, intent)
 	if err != nil {
-		// No match is a valid outcome, not a wire error: reply planned with no
-		// steps so the client can say "nothing matched" and show the rationale.
-		return protocol.Response{Status: protocol.StatusPlanned, Reasoning: intent.Reasoning}
+		// No action is a valid outcome, not a wire error. A conversational
+		// Reply rides along — words only, nothing executes — and the exchange
+		// is recorded so later turns can refer back to it.
+		if intent.Reply != "" {
+			d.emit(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, intent.Reply))
+		}
+		return protocol.Response{Status: protocol.StatusPlanned, Reasoning: intent.Reasoning, Reply: intent.Reply}
 	}
 	return protocol.Response{
 		Status:    protocol.StatusPlanned,
@@ -344,8 +348,12 @@ func (d *Daemon) reasonPlan(req protocol.Request) protocol.Response {
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("planning failed: %v", err)}
 	}
 	if len(plan.Steps) == 0 {
-		// A valid "nothing to do", not an error: planned with no steps.
-		return protocol.Response{Status: protocol.StatusPlanned, Summary: plan.Summary}
+		// A valid "nothing to do", not an error: planned with no steps — with a
+		// conversational Reply riding along when the request was talk.
+		if plan.Reply != "" {
+			d.emit(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, plan.Reply))
+		}
+		return protocol.Response{Status: protocol.StatusPlanned, Summary: plan.Summary, Reply: plan.Reply}
 	}
 	if err := plan.Validate(d.reg); err != nil {
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("invalid plan: %v", err)}

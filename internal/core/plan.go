@@ -14,6 +14,10 @@ type Plan struct {
 	Request string // the original natural-language request
 	Summary string // the model's one-line description of what the plan does
 	Steps   []Step // ordered capability calls; Step is shared with recipes
+	// Reply is the conversational answer when the request is talk, not action
+	// (Steps empty). Like Intent.Reply it is words, not execution — it never
+	// reaches the permission gate.
+	Reply string
 }
 
 // PlannerPort is the multi-step reasoning boundary of the hexagon. An adapter

@@ -75,9 +75,10 @@ var intentSchema = json.RawMessage(`{
   "properties": {
     "capability": {"type": "string"},
     "args": {"type": "object", "additionalProperties": {"type": "string"}},
+    "reply": {"type": "string"},
     "reasoning": {"type": "string"}
   },
-  "required": ["capability"]
+  "required": ["capability", "reply"]
 }`)
 
 // planSchema constrains a multi-step reply to an ordered list of typed steps.
@@ -85,6 +86,7 @@ var planSchema = json.RawMessage(`{
   "type": "object",
   "properties": {
     "summary": {"type": "string"},
+    "reply": {"type": "string"},
     "steps": {
       "type": "array",
       "items": {
@@ -97,7 +99,7 @@ var planSchema = json.RawMessage(`{
       }
     }
   },
-  "required": ["steps"]
+  "required": ["steps", "reply"]
 }`)
 
 type chatMessage struct {
@@ -170,6 +172,7 @@ func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capa
 	var parsed struct {
 		Capability string            `json:"capability"`
 		Args       map[string]string `json:"args"`
+		Reply      string            `json:"reply"`
 		Reasoning  string            `json:"reasoning"`
 	}
 	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
@@ -178,6 +181,7 @@ func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capa
 	return core.Intent{
 		Capability: strings.TrimSpace(parsed.Capability),
 		Args:       core.Args(parsed.Args),
+		Reply:      strings.TrimSpace(parsed.Reply),
 		Reasoning:  parsed.Reasoning,
 	}, nil
 }
@@ -191,6 +195,7 @@ func (c *Client) Plan(ctx context.Context, request string, caps []core.Capabilit
 	}
 	var parsed struct {
 		Summary string `json:"summary"`
+		Reply   string `json:"reply"`
 		Steps   []struct {
 			Capability string            `json:"capability"`
 			Args       map[string]string `json:"args"`
@@ -206,7 +211,7 @@ func (c *Client) Plan(ctx context.Context, request string, caps []core.Capabilit
 			Args:       core.Args(s.Args),
 		})
 	}
-	return core.Plan{Request: request, Summary: parsed.Summary, Steps: steps}, nil
+	return core.Plan{Request: request, Summary: parsed.Summary, Reply: strings.TrimSpace(parsed.Reply), Steps: steps}, nil
 }
 
 // capabilityList renders the menu the model may choose from: nothing outside it
@@ -233,10 +238,15 @@ func recentActions(recent []core.Event, now time.Time) string {
 		return ""
 	}
 	var b strings.Builder
-	b.WriteString("\nYour recent actions, most recent first:\n")
+	b.WriteString("\nYour recent actions and conversation, most recent first:\n")
 	for i := len(recent) - 1; i >= 0; i-- {
 		e := recent[i]
 		age := now.Sub(e.At).Round(time.Second)
+		if e.Kind == core.EventReplied {
+			// Dialogue carries its text — that is what makes it context.
+			fmt.Fprintf(&b, "%d. %s ago: %s %s\n", len(recent)-i, age, e.Kind, e.Detail)
+			continue
+		}
 		args := make([]string, 0, len(e.Args))
 		for k, v := range e.Args {
 			args = append(args, fmt.Sprintf("%s=%s", k, v))
@@ -250,12 +260,27 @@ func recentActions(recent []core.Event, now time.Time) string {
 	return b.String()
 }
 
+// conversationRule teaches the model the third outcome: talk. A reply is words
+// only — the caller speaks it and executes nothing — so the rule insists an
+// action is preferred whenever one fits, and honesty over invention otherwise.
+// The field contract is spelled out structurally: small models otherwise put
+// the word "reply" into the capability field.
+const conversationRule = "You always fill exactly one of two fields, never both:\n" +
+	"- an action: the capability field holds an id copied from the list (and reply stays \"\").\n" +
+	"- an answer: the reply field holds one short sentence in the user's language, spoken aloud to the user (and capability stays \"\").\n" +
+	"Use an answer when the user greets, thanks, or asks you something instead of requesting an action. " +
+	"Answer only from what you see here (your capabilities, the recent history); if you do not know something, say so. " +
+	"Whenever an action fits the request, always prefer the action.\n"
+
 func buildIntentPrompt(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
+	b.WriteString("You are hyprvalet, a voice assistant controlling this Linux desktop.\n")
 	b.WriteString("You translate a user's desktop request into exactly one capability from the list below.\n")
 	b.WriteString("Choose the single capability whose action best matches the request and fill its arguments.\n")
 	b.WriteString("If no capability matches, return an empty string for \"capability\".\n")
-	b.WriteString("Never invent a capability id or an argument name that is not listed. Argument values are strings.\n\n")
+	b.WriteString("Never invent a capability id or an argument name that is not listed. Argument values are strings.\n")
+	b.WriteString(conversationRule)
+	b.WriteString("\n")
 	b.WriteString(capabilityList(caps))
 	b.WriteString(recentActions(recent, time.Now()))
 	return b.String()
@@ -263,11 +288,17 @@ func buildIntentPrompt(caps []core.Capability, recent []core.Event) string {
 
 func buildPlanPrompt(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
+	b.WriteString("You are hyprvalet, a voice assistant controlling this Linux desktop.\n")
 	b.WriteString("You turn a user's desktop request into an ordered plan of one or more capability calls from the list below.\n")
 	b.WriteString("Use as many steps as the request needs, in the order they should run, and fill each step's arguments.\n")
 	b.WriteString("Use only capability ids and argument names from the list. If the request cannot be done with these capabilities, return an empty steps array.\n")
 	b.WriteString("Also give a one-line summary of the plan, in English — it is spoken aloud to the user by an English voice. ")
-	b.WriteString("Each argument value is a plain string with no surrounding braces or quotes — a workspace is 3, not {3} or \"3\".\n\n")
+	b.WriteString("Each argument value is a plain string with no surrounding braces or quotes — a workspace is 3, not {3} or \"3\".\n")
+	b.WriteString("If the user greets, thanks, or asks a question instead of requesting actions, return an empty steps array ")
+	b.WriteString("and put one short sentence in the user's language in the reply field — it is spoken aloud. ")
+	b.WriteString("Answer only from what you see here; if you do not know something, say so. ")
+	b.WriteString("Whenever actions fit the request, prefer actions and leave reply empty.\n")
+	b.WriteString("\n")
 	b.WriteString(capabilityList(caps))
 	b.WriteString(recentActions(recent, time.Now()))
 	return b.String()

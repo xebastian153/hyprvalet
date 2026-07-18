@@ -596,11 +596,17 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 		cap, err := core.ResolveIntent(reg, intent)
 		if err != nil {
 			// A hallucinated capability is the model's mistake too — feed it
-			// back. An empty match ("nothing fits") is an answer, not an error.
+			// back. An empty match ("nothing fits") is an answer, not an error
+			// — and a conversational Reply is the answer itself.
 			if intent.Capability != "" && i < maxInterpretAttempts {
 				fmt.Fprintf(os.Stderr, "model chose badly: %v — asking it to correct\n", err)
 				attempt = correctiveRequest(request, err)
 				continue
+			}
+			if intent.Reply != "" {
+				fmt.Println(intent.Reply)
+				emitEvent(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, intent.Reply))
+				return
 			}
 			fmt.Fprintf(os.Stderr, "%v\n", err)
 			if intent.Reasoning != "" {
@@ -663,6 +669,11 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 	}
 
 	if len(plan.Steps) == 0 {
+		if plan.Reply != "" {
+			fmt.Println(plan.Reply)
+			emitEvent(core.EventReplied, "", nil, fmt.Sprintf("user: %s / assistant: %s", request, plan.Reply))
+			return
+		}
 		fmt.Println("no plan — the model found nothing it could do for that request")
 		return
 	}
@@ -905,6 +916,10 @@ func ctlAsk(rest []string) {
 			os.Exit(1)
 		}
 		if len(resp.Plan) == 0 {
+			if resp.Reply != "" {
+				fmt.Println(resp.Reply)
+				return
+			}
 			fmt.Println("no match — the model found nothing it could do for that request")
 			if resp.Reasoning != "" {
 				fmt.Printf("  reasoning: %s\n", resp.Reasoning)
@@ -957,6 +972,13 @@ func ctlPlan(rest []string, execute bool, speaker *tts.Client) {
 		os.Exit(1)
 	}
 	if len(resp.Plan) == 0 {
+		// Conversation, not action: show and speak the answer. Words execute
+		// nothing, so this path never touches the gate.
+		if resp.Reply != "" {
+			fmt.Println(resp.Reply)
+			say(speaker, resp.Reply)
+			return
+		}
 		fmt.Println("no plan — the model found nothing it could do for that request")
 		say(speaker, "I found nothing I can do for that.")
 		return

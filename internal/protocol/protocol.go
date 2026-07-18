@@ -71,6 +71,10 @@ type Response struct {
 	Summary   string     `json:"summary,omitempty"`   // the plan's one-line description, for planned
 	Reasoning string     `json:"reasoning,omitempty"` // the model's rationale for a single intent (ask)
 	Plan      []PlanStep `json:"plan,omitempty"`      // the reasoned, policy-bound steps, for planned
+	// Reply is the conversational answer when the request was talk, not action
+	// (planned with no steps). Words only — the client shows and speaks it;
+	// nothing executes.
+	Reply string `json:"reply,omitempty"`
 	// Retryable marks an error as a capability argument rejection — the model's
 	// mistake, correctable by re-asking it with this error as feedback. Runtime
 	// failures (a dead tool, a broken pipe) are not retryable: re-asking the

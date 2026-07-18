@@ -158,6 +158,38 @@ func TestPlanEmptyStepsIsNotError(t *testing.T) {
 	}
 }
 
+func TestInterpretParsesReply(t *testing.T) {
+	ts := mockOllama(t, `{"capability":"","reply":" I can switch workspaces. "}`, nil)
+	defer ts.Close()
+
+	intent, err := New(ts.URL, "m").Interpret(context.Background(), "what can you do?", nil, nil)
+	if err != nil {
+		t.Fatalf("Interpret: %v", err)
+	}
+	if intent.Capability != "" || intent.Reply != "I can switch workspaces." {
+		t.Fatalf("conversational intent = %+v", intent)
+	}
+}
+
+func TestPromptCarriesDialogueMemory(t *testing.T) {
+	var got chatRequest
+	ts := mockOllama(t, `{"capability":""}`, &got)
+	defer ts.Close()
+
+	recent := []core.Event{{
+		At:     time.Now().Add(-time.Minute),
+		Kind:   core.EventReplied,
+		Detail: "user: hola / assistant: Hello there.",
+	}}
+	if _, err := New(ts.URL, "m").Interpret(context.Background(), "what did I just say?", nil, recent); err != nil {
+		t.Fatalf("Interpret: %v", err)
+	}
+	// Dialogue must carry its text — an entry reading just "replied" is not context.
+	if !strings.Contains(got.Messages[0].Content, "assistant: Hello there.") {
+		t.Fatalf("system prompt is missing the dialogue text:\n%s", got.Messages[0].Content)
+	}
+}
+
 func TestPromptCarriesRecentActions(t *testing.T) {
 	var got chatRequest
 	ts := mockOllama(t, `{"capability":""}`, &got)

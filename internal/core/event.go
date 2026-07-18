@@ -12,6 +12,11 @@ const (
 	EventDenied       EventKind = "denied"        // policy refused it; nothing ran
 	EventNeedsConfirm EventKind = "needs_confirm" // refused pending a human's approval
 	EventDeclined     EventKind = "declined"      // a human was asked and said no
+	// EventReplied records a conversational exchange (question and answer, no
+	// action). Dialogue is part of the same episodic history as actions, which
+	// is what makes multi-turn conversation work: the reasoning layer sees what
+	// was said the same way it sees what was done.
+	EventReplied EventKind = "replied"
 )
 
 // Event is one immutable fact in the agent's history: an action that was

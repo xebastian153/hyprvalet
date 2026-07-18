@@ -6,12 +6,18 @@ import (
 )
 
 // Intent is a structured interpretation of a natural-language request: the one
-// capability the reasoning layer chose and the arguments it filled. It is the
-// ONLY thing that layer may emit — never a shell string. An empty Capability
-// means the model found nothing in the allowlist matching the request.
+// capability the reasoning layer chose and the arguments it filled — or, when
+// the request is conversation rather than a desktop action, a textual Reply.
+// These are the ONLY things that layer may emit — never a shell string.
+//
+// Reply is safe by construction: it is words, not execution. It never reaches
+// the permission gate because it touches nothing the gate guards. An Intent
+// with an empty Capability and an empty Reply means the model found nothing to
+// do and nothing to say.
 type Intent struct {
-	Capability string // chosen capability ID; "" if nothing matched
+	Capability string // chosen capability ID; "" if the request maps to no action
 	Args       Args   // arguments the model filled for that capability
+	Reply      string // conversational answer when the request is talk, not action
 	Reasoning  string // optional one-line rationale, for transparency and logs
 }
 
