@@ -1496,6 +1496,25 @@ func phrase(key string) string {
 	return spokenPhrases["English"][key]
 }
 
+// announcePayload reads back what a sensitive relay is about to send, BEFORE
+// the confirmation, so a voice "yes" approves the actual content — not a blind
+// nod to a message the model may have gotten wrong. A relayed message once
+// drifted from "hello" to a remembered example; hearing it first catches that.
+func announcePayload(speaker speech.Speaker, cap string, args map[string]string) {
+	if cap != "terminal.send" {
+		return
+	}
+	text := strings.TrimSpace(args["text"])
+	if text == "" {
+		return
+	}
+	lead := "I will send to Claude: "
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("HYPRVALET_LANG")), "spanish") {
+		lead = "Voy a enviarle a Claude: "
+	}
+	say(speaker, lead+text)
+}
+
 // say speaks text when a speaker is present. Speech is an output garnish:
 // failures warn and are swallowed, never changing what the command does.
 func say(speaker speech.Speaker, text string) {
@@ -1561,6 +1580,7 @@ func ctlAsk(rest []string, speaker speech.Speaker, confirm func(string) bool, ca
 		if resp.Reasoning != "" {
 			fmt.Printf("  reasoning: %s\n", resp.Reasoning)
 		}
+		announcePayload(speaker, step.Cap, step.Args)
 		if cautious && !confirm(fmt.Sprintf("run %s?", step.Cap)) {
 			fmt.Println("aborted")
 			return true
@@ -1668,6 +1688,9 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker, confirm func(s
 	// the plan.
 	approved := false
 	if planNeedsConfirmation(resp.Plan) {
+		for _, s := range resp.Plan {
+			announcePayload(speaker, s.Cap, s.Args)
+		}
 		if !confirm(fmt.Sprintf("execute this %d-step plan?", len(resp.Plan))) {
 			fmt.Println("aborted")
 			return true
