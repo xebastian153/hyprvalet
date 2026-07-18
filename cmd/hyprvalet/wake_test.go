@@ -33,3 +33,28 @@ func TestWakeWordsAlternates(t *testing.T) {
 		}
 	}
 }
+
+func TestWakeMatchesFuzzy(t *testing.T) {
+	wakes := map[string]bool{"jarvis": true}
+	// Edit distance ≤2 catches minor slips.
+	for _, w := range []string{"jarvis", "Jarvis", "yarvis", "jervis", "járvis", "jarbis"} {
+		if !wakeMatches(w, wakes) {
+			t.Errorf("%q should wake (near-mishearing of jarvis)", w)
+		}
+	}
+	// Farther mishearings (gerbis, gerbys) are distance 3 — handled by explicit
+	// alternates in HYPRVALET_WAKE_WORD, not by widening the fuzzy radius, which
+	// would false-wake on real words.
+	for _, w := range []string{"hola", "abrí", "casa", "gracias", "martes"} {
+		if wakeMatches(w, wakes) {
+			t.Errorf("%q must NOT wake (unrelated word)", w)
+		}
+	}
+	// With the alternates configured, the far mishearings wake too.
+	alt := map[string]bool{"jarvis": true, "gerbis": true, "gerbys": true}
+	for _, w := range []string{"gerbis", "gerbys", "yarvis"} {
+		if !wakeMatches(w, alt) {
+			t.Errorf("%q should wake with alternates configured", w)
+		}
+	}
+}

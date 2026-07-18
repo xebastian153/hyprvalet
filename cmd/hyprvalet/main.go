@@ -1115,6 +1115,58 @@ func wakeWords() map[string]bool {
 	return set
 }
 
+// wakeMatches reports whether a spoken word IS a wake word — tolerantly.
+// Speech recognition mangles a bare name ("jarvis" → "yarvis", "jervis",
+// "gerbis"), and the whole point is to activate on just the name, so a close
+// misspelling (edit distance ≤ 2 for names of a few letters) counts.
+func wakeMatches(word string, wakes map[string]bool) bool {
+	word = strings.Trim(strings.ToLower(word), ".,!?¡¿;:")
+	if word == "" {
+		return false
+	}
+	for wake := range wakes {
+		if word == wake {
+			return true
+		}
+		if len(wake) >= 5 && levenshtein(word, wake) <= 2 {
+			return true
+		}
+	}
+	return false
+}
+
+// levenshtein is the edit distance between two short strings.
+func levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	prev := make([]int, len(rb)+1)
+	for j := range prev {
+		prev[j] = j
+	}
+	for i := 1; i <= len(ra); i++ {
+		cur := make([]int, len(rb)+1)
+		cur[0] = i
+		for j := 1; j <= len(rb); j++ {
+			cost := 1
+			if ra[i-1] == rb[j-1] {
+				cost = 0
+			}
+			cur[j] = min3(cur[j-1]+1, prev[j]+1, prev[j-1]+cost)
+		}
+		prev = cur
+	}
+	return prev[len(rb)]
+}
+
+func min3(a, b, c int) int {
+	if b < a {
+		a = b
+	}
+	if c < a {
+		a = c
+	}
+	return a
+}
+
 // stripWake reports whether the utterance addresses the assistant by a wake
 // word within its first two words, and returns the remainder — the command
 // spoken in the same breath ("jarvis, abrí el navegador" → "abrí el
@@ -1126,7 +1178,7 @@ func stripWake(text string, wakes map[string]bool) (string, bool) {
 		limit = len(words)
 	}
 	for i := 0; i < limit; i++ {
-		if wakes[strings.Trim(strings.ToLower(words[i]), ".,!?¡¿;:")] {
+		if wakeMatches(words[i], wakes) {
 			return strings.TrimSpace(strings.TrimLeft(strings.Join(words[i+1:], " "), ".,!?¡¿;: ")), true
 		}
 	}
