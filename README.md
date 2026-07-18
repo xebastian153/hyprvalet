@@ -188,8 +188,11 @@ go build -o hyprvalet ./cmd/hyprvalet
 ```
 
 Reasoning uses local Ollama out of the box (`HYPRVALET_MODEL`, default
-`qwen2.5:7b`). Set `GROQ_API_KEY` to use a large cloud model
-(`openai/gpt-oss-120b`) with the local model as an automatic fallback.
+`qwen2.5:7b`). Set `OPENAI_API_KEY` or `GROQ_API_KEY` to use a cloud model;
+the providers compose as a resilient chain, OpenAI → Groq → Ollama, so losing
+one falls through to the next. (Consumer subscriptions like ChatGPT Plus or
+Gemini Advanced are not API access; hyprvalet uses pay-per-token API keys,
+which for short spoken commands cost pennies a month.)
 
 ### Voice
 
@@ -210,7 +213,8 @@ systemd units.
 
 | Variable | Purpose |
 |---|---|
-| `GROQ_API_KEY` · `HYPRVALET_GROQ_MODEL` | cloud reasoning — default `openai/gpt-oss-120b` |
+| `OPENAI_API_KEY` · `HYPRVALET_OPENAI_MODEL` | cloud reasoning via OpenAI — default `gpt-4o-mini` (cheap; pennies/month for short commands) |
+| `GROQ_API_KEY` · `HYPRVALET_GROQ_MODEL` | cloud reasoning via Groq — default `openai/gpt-oss-120b` |
 | `HYPRVALET_MODEL` | local Ollama model — fallback / offline |
 | `HYPRVALET_LANG` | spoken-output language — `English` / `Spanish` |
 | `ELEVENLABS_API_KEY` · `HYPRVALET_VOICE` | natural TTS voice — falls back to Edge, then piper |

@@ -38,6 +38,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/mic"
 	"github.com/xebastian153/hyprvalet/internal/adapters/ollama"
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
+	"github.com/xebastian153/hyprvalet/internal/adapters/openai"
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/project"
 	"github.com/xebastian153/hyprvalet/internal/adapters/prompt"
@@ -79,27 +80,40 @@ func buildRegistry() *core.Registry {
 // a failed append warns and the action's outcome stands.
 var events = eventlog.New(eventlog.Path())
 
-// defaultReasoner picks the reasoning provider: Groq (cloud — larger models at
-// interactive speed) when GROQ_API_KEY is set, composed with local Ollama as an
-// automatic fallback so losing the network never silences the agent; local
-// Ollama alone otherwise. The privacy trade is explicit: with Groq, requests
-// and their episodic-memory context leave the machine.
-func defaultReasoner() fallback.Reasoner {
-	local := ollama.Default()
-	if groq.Available() {
-		return fallback.New(groq.Default(), local)
+// reasonerChain composes the configured reasoning providers, most-preferred
+// first, with local Ollama always last — resilient by composition, so losing a
+// provider or the network degrades quality, never availability. Order:
+// OpenAI → Groq → Ollama, each layer used only when its key is set. strong
+// selects the escalation tier (a larger model for the corrective retry). The
+// privacy trade is explicit: any cloud layer sends the request, including its
+// episodic-memory context, off the machine.
+func reasonerChain(strong bool) fallback.Reasoner {
+	var r fallback.Reasoner = ollama.Default()
+	if strong {
+		r = ollama.Strong()
 	}
-	return local
+	if groq.Available() {
+		if strong {
+			r = fallback.New(groq.Strong(), r)
+		} else {
+			r = fallback.New(groq.Default(), r)
+		}
+	}
+	if openai.Available() {
+		if strong {
+			r = fallback.New(openai.Strong(), r)
+		} else {
+			r = fallback.New(openai.Default(), r)
+		}
+	}
+	return r
 }
 
-// strongReasoner picks the escalation tier for the corrective loop, with the
-// same cloud-with-local-fallback composition.
-func strongReasoner() core.LLMPort {
-	if groq.Available() {
-		return fallback.New(groq.Strong(), ollama.Strong())
-	}
-	return ollama.Strong()
-}
+// defaultReasoner is the primary reasoning tier.
+func defaultReasoner() fallback.Reasoner { return reasonerChain(false) }
+
+// strongReasoner is the escalation tier for the corrective loop.
+func strongReasoner() core.LLMPort { return reasonerChain(true) }
 
 // conversant is a reasoner that can hold a raw JSON conversation — the project-
 // planning flow is a dialogue, not a typed capability call, so it needs this
@@ -108,12 +122,12 @@ type conversant interface {
 	Chat(ctx context.Context, system, user string) (string, error)
 }
 
-// planningReasoner reasons the planning conversation: Groq with the local model
-// as fallback when available, local Ollama otherwise — the same composition as
-// the rest of hyprvalet.
+// planningReasoner reasons the planning conversation, using the same provider
+// chain. Every backend in the chain can hold a raw Chat turn, so the composed
+// reasoner satisfies conversant.
 func planningReasoner() conversant {
-	if groq.Available() {
-		return fallback.New(groq.Default(), ollama.Default())
+	if c, ok := reasonerChain(false).(conversant); ok {
+		return c
 	}
 	return ollama.Default()
 }
