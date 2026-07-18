@@ -553,6 +553,14 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 	n := len(plan.Steps)
 	for i, s := range plan.Steps {
 		cap, _ := reg.Get(s.Capability)
+		// Plan-binding re-validation (TOCTOU): the plan was approved as a whole,
+		// but re-check each step against the policy the instant before it runs.
+		// A grant that expired between approval and now (e.g. an arming window)
+		// blocks the step instead of slipping through on the stale approval.
+		if core.Decide(dc.rules, dc.arm, dc.session, cap, time.Now()) == core.DecisionDeny {
+			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): no longer permitted (state changed since approval)\n", i+1, n, s.Capability)
+			os.Exit(1)
+		}
 		out, err := cap.Run(context.Background(), s.Args)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "plan failed at step %d/%d (%s): %v\n", i+1, n, s.Capability, err)
