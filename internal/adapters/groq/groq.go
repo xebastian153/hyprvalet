@@ -52,18 +52,18 @@ func New(baseURL, model, key string) *Client {
 func Default() *Client {
 	return New(
 		envOr("HYPRVALET_GROQ_URL", "https://api.groq.com/openai/v1"),
-		envOr("HYPRVALET_GROQ_MODEL", "llama-3.3-70b-versatile"),
+		envOr("HYPRVALET_GROQ_MODEL", "openai/gpt-oss-120b"),
 		os.Getenv("GROQ_API_KEY"),
 	)
 }
 
-// Strong builds the escalation client. With a 70B default the same model plus
-// corrective feedback is usually enough, so it defaults to the same model;
-// HYPRVALET_GROQ_MODEL_STRONG picks a bigger one.
+// Strong builds the escalation client. The default model is already large, so
+// the same model plus corrective feedback is usually enough; it defaults to the
+// same one, and HYPRVALET_GROQ_MODEL_STRONG can point at another.
 func Strong() *Client {
 	return New(
 		envOr("HYPRVALET_GROQ_URL", "https://api.groq.com/openai/v1"),
-		envOr("HYPRVALET_GROQ_MODEL_STRONG", envOr("HYPRVALET_GROQ_MODEL", "llama-3.3-70b-versatile")),
+		envOr("HYPRVALET_GROQ_MODEL_STRONG", envOr("HYPRVALET_GROQ_MODEL", "openai/gpt-oss-120b")),
 		os.Getenv("GROQ_API_KEY"),
 	)
 }
