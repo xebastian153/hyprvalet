@@ -45,22 +45,22 @@ prompt, decides whether it runs.
 
 ```mermaid
 flowchart LR
-    subgraph FE["🎙️ Frontend · edge"]
+    subgraph FE["Frontend · edge"]
         direction TB
         WW["Wake word + VAD<br/>barge-in"] --> STT["Speech-to-text<br/>whisper.cpp"]
     end
 
-    subgraph BR["🧠 Reasoning · ports"]
+    subgraph BR["Reasoning · ports"]
         direction TB
         GQ["Groq<br/>gpt-oss-120b"] -.-> OL["Ollama<br/>local · fallback"]
     end
 
-    subgraph GT["🔒 Permission gate · core"]
+    subgraph GT["Permission gate · core"]
         direction TB
         PO["Policy<br/>allow · ask · deny"] --- AR["Arming · session<br/>doom-loop breaker"]
     end
 
-    subgraph EX["⚙️ Capability · allowlist"]
+    subgraph EX["Capability · allowlist"]
         direction TB
         CA["hyprctl · omarchy<br/>tmux · web · …"]
     end
@@ -69,7 +69,7 @@ flowchart LR
     BR -->|typed intent| GT
     GT -->|allowed| EX
     GT -.-> TTS
-    EX --> TTS["🔊 Text-to-speech<br/>ElevenLabs → Edge → piper"]
+    EX --> TTS["Text-to-speech<br/>ElevenLabs → Edge → piper"]
 ```
 
 ## Architecture
@@ -88,7 +88,7 @@ flowchart TB
         DAEMON["Resident daemon<br/>Unix socket"]
     end
 
-    subgraph CORE["🧩 core — pure domain, no tool dependencies"]
+    subgraph CORE["core — pure domain, no tool dependencies"]
         direction TB
         REG["Registry<br/>the allowlist"]
         CAP["Capability · AccessKind · Risk"]
@@ -143,8 +143,8 @@ converses on your behalf; it never consents on your behalf.
 ```mermaid
 sequenceDiagram
     actor You
-    participant J as 🎙️ Jarvis
-    participant C as 🤖 Claude Code
+    participant J as Jarvis
+    participant C as Claude Code
     You->>J: "open a project called shop"
     J->>You: "shall I proceed?"
     You->>J: "yes"

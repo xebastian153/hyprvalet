@@ -16,12 +16,12 @@
 
 ---
 
-Decís _"Jarvis"_ al aire y se abre una ventana de conversación. Le pedís que
-cambie de workspace, abra apps, ponga un recordatorio, busque en internet, o que
-cree un proyecto y abra [Claude Code](https://claude.com/claude-code) ahí — manos
-libres, en tu idioma. Razona con un modelo grande en la nube (con respaldo
-local), te responde con voz natural, recuerda la conversación, y podés
-interrumpirlo hablándole encima.
+Dices _"Jarvis"_ y se abre una ventana de conversación. Le pides que cambie de
+workspace, abra aplicaciones, programe un recordatorio, busque en internet, o que
+cree un proyecto y abra [Claude Code](https://claude.com/claude-code) en él —
+manos libres, en tu idioma. Razona con un modelo grande en la nube (con respaldo
+local), responde con voz natural, recuerda la conversación, y puedes
+interrumpirlo hablando sobre él.
 
 Y debajo de todo: **el modelo nunca ejecuta un shell.** Solo puede invocar
 **capabilities tipadas** de un allowlist explícito — cada una declara qué toca y
@@ -30,38 +30,38 @@ qué tan riesgosa es — y las acciones disruptivas preguntan antes de actuar.
 ## Por qué este diseño
 
 La mayoría de los proyectos "Jarvis" conectan un modelo de lenguaje directo a un
-shell y cruzan los dedos. hyprvalet apuesta lo contrario: **el gate es la
+shell y confían en la suerte. hyprvalet apuesta lo contrario: **el gate es la
 frontera de seguridad, nunca el prompt.** Lo que no está registrado como
 capability es imposible — no "ojalá bloqueado". Un comando mal entendido no puede
-hacer `rm -rf` de tu carpeta personal, porque ninguna capability ejecuta
+ejecutar `rm -rf` sobre tu carpeta personal, porque ninguna capability corre
 comandos arbitrarios. Una vez el reconocimiento de voz confundió una pregunta con
 una acción, y la capability de bloqueo de pantalla —al ser de confirmación— lo
-atajó: el gate tipado hizo su trabajo.
+detuvo: el gate tipado hizo su trabajo.
 
 ## Cómo funciona
 
-Un pedido hablado atraviesa cuatro etapas. El razonamiento mapea la intención a
-una **llamada a una capability tipada** —nunca un string de shell— y el gate de
-permisos, no el prompt, decide si se ejecuta.
+Una solicitud hablada atraviesa cuatro etapas. El razonamiento mapea la
+intención a una **llamada a una capability tipada** —nunca un string de shell— y
+el gate de permisos, no el prompt, decide si se ejecuta.
 
 ```mermaid
 flowchart LR
-    subgraph FE["🎙️ Frontend · borde"]
+    subgraph FE["Frontend · borde"]
         direction TB
         WW["Palabra de activación + VAD<br/>interrupción"] --> STT["Voz a texto<br/>whisper.cpp"]
     end
 
-    subgraph BR["🧠 Razonamiento · puertos"]
+    subgraph BR["Razonamiento · puertos"]
         direction TB
         GQ["Groq<br/>gpt-oss-120b"] -.-> OL["Ollama<br/>local · respaldo"]
     end
 
-    subgraph GT["🔒 Gate de permisos · core"]
+    subgraph GT["Gate de permisos · core"]
         direction TB
         PO["Política<br/>permitir · preguntar · negar"] --- AR["Armado · sesión<br/>corta-bucles"]
     end
 
-    subgraph EX["⚙️ Capability · allowlist"]
+    subgraph EX["Capability · allowlist"]
         direction TB
         CA["hyprctl · omarchy<br/>tmux · web · …"]
     end
@@ -70,15 +70,15 @@ flowchart LR
     BR -->|intención tipada| GT
     GT -->|permitido| EX
     GT -.-> TTS
-    EX --> TTS["🔊 Texto a voz<br/>ElevenLabs → Edge → piper"]
+    EX --> TTS["Texto a voz<br/>ElevenLabs → Edge → piper"]
 ```
 
 ## Arquitectura
 
 hyprvalet es un sistema **hexagonal** (puertos y adaptadores). El core depende
-solo de interfaces pequeñas — no sabe nada de `hyprctl`, del CLI de `omarchy`,
-Ollama, Groq, ElevenLabs, whisper ni tmux. Cada herramienta concreta es un
-adaptador en el borde, intercambiable sin tocar el core.
+solo de interfaces pequeñas — no conoce `hyprctl`, el CLI de `omarchy`, Ollama,
+Groq, ElevenLabs, whisper ni tmux. Cada herramienta concreta es un adaptador en
+el borde, intercambiable sin tocar el core.
 
 ```mermaid
 flowchart TB
@@ -89,12 +89,12 @@ flowchart TB
         DAEMON["Daemon residente<br/>socket Unix"]
     end
 
-    subgraph CORE["🧩 core — dominio puro, sin dependencias de herramientas"]
+    subgraph CORE["core — dominio puro, sin dependencias de herramientas"]
         direction TB
         REG["Registro<br/>el allowlist"]
         CAP["Capability · AccessKind · Risk"]
         POL["Política · Armado · Sesión"]
-        AUD["Log de auditoría · Memoria episódica"]
+        AUD["Registro de auditoría · Memoria episódica"]
     end
 
     subgraph PORTS["Puertos"]
@@ -124,41 +124,41 @@ orquestación de agentes — ver [`docs/SOURCES.md`](./docs/SOURCES.md)):
 
 - **El registro de capabilities tipadas es un allowlist.** Nada fuera de él es
   alcanzable. Cada capability valida sus propios argumentos y devuelve un *error
-  correctivo* — que el bucle de razonamiento le re-inyecta al modelo para
-  reintentar — en vez de ejecutar con datos malos.
+  correctivo* — que el bucle de razonamiento reinyecta al modelo para
+  reintentar — en vez de ejecutar con datos inválidos.
 - **Separar el _qué_ del _si_.** El `AccessKind` de una capability (qué toca) es
   distinto de la decisión de si se ejecuta. Lo Safe corre; lo Confirm pregunta
   primero — por voz o teclado, fallando cerrado.
 - **Resiliente por composición.** El razonamiento es Groq → Ollama local; la voz
   es ElevenLabs → Edge → piper. Perder la red degrada la calidad, nunca la
-  disponibilidad — y la degradación se avisa, nunca es silenciosa.
-- **Razona por vos, jamás consiente por vos.** Ver el puente con Claude Code.
+  disponibilidad — y la degradación se anuncia, nunca es silenciosa.
+- **Razona por ti, jamás consiente por ti.** Ver el puente con Claude Code.
 
 ## El puente con Claude Code
 
 hyprvalet puede abrir [Claude Code](https://claude.com/claude-code) en un
-proyecto, **leer** lo que muestra, y **relayar** por voz tus respuestas — pero
-vos aprobás cada acción, y los propios permisos de Claude siguen en pie. El
+proyecto, **leer** lo que muestra, y **retransmitir** por voz tus respuestas —
+pero tú apruebas cada acción, y los propios permisos de Claude siguen en pie. El
 asistente conversa en tu nombre; nunca consiente en tu nombre.
 
 ```mermaid
 sequenceDiagram
-    actor Vos
-    participant J as 🎙️ Jarvis
-    participant C as 🤖 Claude Code
-    Vos->>J: "creá un proyecto llamado tienda"
-    J->>Vos: "¿procedo?"
-    Vos->>J: "sí"
+    actor Usuario
+    participant J as Jarvis
+    participant C as Claude Code
+    Usuario->>J: "crea un proyecto llamado tienda"
+    J->>Usuario: "¿procedo?"
+    Usuario->>J: "sí"
     J->>C: crea la carpeta + abre en tmux
-    Vos->>J: "¿qué está haciendo Claude?"
+    Usuario->>J: "¿qué está haciendo Claude?"
     J->>C: lee la terminal (tmux capture-pane)
     C-->>J: pantalla en vivo
-    J-->>Vos: resumen hablado en lenguaje natural
-    Vos->>J: "decile que sí, que agregue el logout"
-    J->>Vos: "¿procedo?"
-    Vos->>J: "sí"
-    J->>C: relaya (tmux send-keys)
-    Note over Vos,C: Vos seguís en el loop en cada acción.
+    J-->>Usuario: resumen hablado en lenguaje natural
+    Usuario->>J: "dile que sí, que agregue el logout"
+    J->>Usuario: "¿procedo?"
+    Usuario->>J: "sí"
+    J->>C: retransmite (tmux send-keys)
+    Note over Usuario,C: Tú sigues en el bucle en cada acción.
 ```
 
 ## Capabilities (25)
@@ -166,18 +166,18 @@ sequenceDiagram
 | Dominio | Capabilities |
 |---|---|
 | Workspaces / ventanas | `workspace.switch` · `window.move_to_workspace` · `window.close` · `window.fullscreen` |
-| Apps y web | `app.open` · `browser.open` · `music.open` · `web.open` · `web.search` |
+| Aplicaciones y web | `app.open` · `browser.open` · `music.open` · `web.open` · `web.search` |
 | Multimedia y audio | `media.play_pause` · `media.next` · `media.previous` · `volume.set` · `volume.mute` |
 | Escritorio | `theme.next` · `theme.set` · `nightlight.toggle` · `screenshot.take` · `system.lock` · `omarchy.run` |
 | Asistente | `reminder.set` — recordatorios hablados proactivos |
 | Puente con Claude Code | `project.new` · `project.open` · `terminal.read` · `terminal.send` |
 
-Agregar una es simple: implementá la interfaz `core.Capability` en un adaptador y
-registrala.
+Agregar una es simple: implementa la interfaz `core.Capability` en un adaptador y
+regístrala.
 
 ## Inicio rápido
 
-Requiere [Go](https://go.dev/) 1.23+ y una sesión de Hyprland corriendo.
+Requiere [Go](https://go.dev/) 1.23+ y una sesión de Hyprland en ejecución.
 
 ```bash
 git clone https://github.com/xebastian153/hyprvalet.git
@@ -185,12 +185,12 @@ cd hyprvalet
 go build -o hyprvalet ./cmd/hyprvalet
 
 ./hyprvalet list                                     # qué puede hacer, y su política
-./hyprvalet workspace.switch workspace=3             # correr una capability directo
-./hyprvalet do "abrí el navegador y volvé al workspace 2"   # razonar → confirmar → correr
+./hyprvalet workspace.switch workspace=3             # correr una capability directamente
+./hyprvalet do "abre el navegador y vuelve al workspace 2"   # razonar → confirmar → correr
 ```
 
-El razonamiento usa Ollama local de fábrica (`HYPRVALET_MODEL`, por defecto
-`qwen2.5:7b`). Poné `GROQ_API_KEY` para usar un modelo grande en la nube
+El razonamiento usa Ollama local de forma predeterminada (`HYPRVALET_MODEL`, por
+defecto `qwen2.5:7b`). Define `GROQ_API_KEY` para usar un modelo grande en la nube
 (`openai/gpt-oss-120b`) con el modelo local como respaldo automático.
 
 ### Voz
@@ -198,11 +198,11 @@ El razonamiento usa Ollama local de fábrica (`HYPRVALET_MODEL`, por defecto
 ```bash
 ./hyprvalet say "hola"        # decir texto (necesita un backend TTS: piper / edge-tts / ElevenLabs)
 ./hyprvalet voice             # una ventana de conversación manos libres
-./hyprvalet listen            # siempre encendido: abre la ventana con la palabra "jarvis"
+./hyprvalet listen            # siempre activo: abre la ventana con la palabra "jarvis"
 ```
 
 Para la experiencia completa de escritorio — un servicio de palabra de activación
-siempre encendido y un atajo `SUPER+A` — mirá las unidades de ejemplo en
+siempre activo y un atajo `SUPER+A` — consulta las unidades de ejemplo en
 [`configs/systemd/`](./configs/systemd/) y el directorio
 [`configs/`](./configs/) (política, recetas, cancelación de eco).
 
@@ -214,18 +214,18 @@ las unidades systemd.
 | Variable | Para qué |
 |---|---|
 | `GROQ_API_KEY` · `HYPRVALET_GROQ_MODEL` | razonamiento en la nube — por defecto `openai/gpt-oss-120b` |
-| `HYPRVALET_MODEL` | modelo Ollama local — respaldo / offline |
+| `HYPRVALET_MODEL` | modelo Ollama local — respaldo / sin conexión |
 | `HYPRVALET_LANG` | idioma de la salida hablada — `English` / `Spanish` |
 | `ELEVENLABS_API_KEY` · `HYPRVALET_VOICE` | voz TTS natural — cae a Edge, luego piper |
 | `HYPRVALET_WHISPER_MODEL` · `HYPRVALET_STT_LANG` | reconocimiento de voz — whisper.cpp |
 | `HYPRVALET_WAKE_WORD` | palabra de activación + alternativas separadas por coma |
-| `HYPRVALET_BARGE_IN` | interrumpir mientras habla — necesita auriculares o cancelación de eco |
+| `HYPRVALET_BARGE_IN` | interrumpir mientras habla — requiere auriculares o cancelación de eco |
 | `HYPRVALET_PROJECTS_DIR` | dónde crea `project.new` — por defecto `~/proyectos` |
 
-La política de permisos es un TOML del instalador en
+La política de permisos es un TOML propiedad del instalador en
 `~/.config/hyprvalet/policy.toml` (ver
 [`configs/policy.example.toml`](./configs/policy.example.toml)); una política
-rota falla cerrado.
+inválida falla cerrada.
 
 ## Estructura del proyecto
 
@@ -244,9 +244,9 @@ docs/DESIGN.md          arquitectura profunda   ·   docs/SOURCES.md   procedenc
 
 ## Contribuir
 
-Las capabilities nuevas son el lugar más fácil para ayudar: implementá la
-interfaz `core.Capability` en un adaptador, validá tus argumentos (devolvé un
-error correctivo, no un crash), y registrala. Mantené el core libre de cualquier
+Las capabilities nuevas son el lugar más fácil para ayudar: implementa la
+interfaz `core.Capability` en un adaptador, valida tus argumentos (devuelve un
+error correctivo, no un crash), y regístrala. Mantén el core libre de cualquier
 dependencia de una herramienta concreta — esa separación es todo el punto.
 
 ## Licencia
