@@ -11,7 +11,7 @@ type stubPlanner struct {
 	err  error
 }
 
-func (s stubPlanner) Plan(context.Context, string, []Capability) (Plan, error) {
+func (s stubPlanner) Plan(context.Context, string, []Capability, []Event) (Plan, error) {
 	return s.plan, s.err
 }
 
@@ -67,12 +67,12 @@ func TestPlanValidate(t *testing.T) {
 
 func TestPlannerPortContract(t *testing.T) {
 	planner := stubPlanner{err: context.DeadlineExceeded}
-	if _, err := planner.Plan(context.Background(), "x", nil); err == nil {
+	if _, err := planner.Plan(context.Background(), "x", nil, nil); err == nil {
 		t.Fatal("stub should propagate its error")
 	}
 
 	planner = stubPlanner{plan: Plan{Steps: nil}}
-	got, err := planner.Plan(context.Background(), "impossible", nil)
+	got, err := planner.Plan(context.Background(), "impossible", nil, nil)
 	if err != nil {
 		t.Fatalf("an unfulfillable request must not be an error: %v", err)
 	}

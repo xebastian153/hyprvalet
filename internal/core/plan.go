@@ -20,12 +20,13 @@ type Plan struct {
 // (e.g. a local Ollama model) implements it; the core depends only on this
 // interface. Plan maps a natural-language request to an ordered Plan, choosing
 // only from the capabilities it is given, so the caller controls the menu.
+// recent is the agent's episodic memory (see LLMPort); nil means no memory.
 //
 // A returned error means the reasoning itself failed (model unreachable,
 // timeout, unparseable output). A request the model cannot fulfill with the
 // available capabilities returns a Plan with no steps, not an error.
 type PlannerPort interface {
-	Plan(ctx context.Context, request string, caps []Capability) (Plan, error)
+	Plan(ctx context.Context, request string, caps []Capability, recent []Event) (Plan, error)
 }
 
 // Validate checks a plan is safe and runnable against the registry: it has at

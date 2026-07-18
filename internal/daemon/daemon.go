@@ -96,6 +96,22 @@ func New(reg *core.Registry, rules core.PolicyRules, planner core.PlannerPort, l
 	}
 }
 
+// recent returns the agent's episodic memory for the reasoning ports: the
+// latest audit events inside the memory window. Memory is a nice-to-have, never
+// a gate — any failure reads as an empty past. Safe off the actor goroutine:
+// the store is read-only state and reads its file independently.
+func (d *Daemon) recent() []core.Event {
+	if d.events == nil {
+		return nil
+	}
+	list, err := d.events.Tail(core.MemoryEvents)
+	if err != nil {
+		d.log.Printf("warning: could not read recent events: %v", err)
+		return nil
+	}
+	return core.RecentEvents(list, time.Now(), core.MemoryWindow)
+}
+
 // emit appends one event to the audit log. Auditing is an observer, never a
 // gate: a failed append is logged and the action's outcome stands.
 func (d *Daemon) emit(kind core.EventKind, cap string, args core.Args, detail string) {
@@ -279,7 +295,7 @@ func (d *Daemon) reasonAsk(req protocol.Request) protocol.Response {
 		return protocol.Response{Status: protocol.StatusError, Error: "empty request"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	intent, err := d.llm.Interpret(ctx, request, d.reg.List())
+	intent, err := d.llm.Interpret(ctx, request, d.reg.List(), d.recent())
 	cancel()
 	if err != nil {
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("reasoning failed: %v", err)}
@@ -312,7 +328,7 @@ func (d *Daemon) reasonPlan(req protocol.Request) protocol.Response {
 		return protocol.Response{Status: protocol.StatusError, Error: "empty request"}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	plan, err := d.planner.Plan(ctx, request, d.reg.List())
+	plan, err := d.planner.Plan(ctx, request, d.reg.List(), d.recent())
 	cancel()
 	if err != nil {
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("planning failed: %v", err)}

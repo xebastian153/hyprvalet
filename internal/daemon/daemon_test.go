@@ -59,7 +59,7 @@ type fakePlanner struct {
 	err  error
 }
 
-func (f fakePlanner) Plan(context.Context, string, []core.Capability) (core.Plan, error) {
+func (f fakePlanner) Plan(context.Context, string, []core.Capability, []core.Event) (core.Plan, error) {
 	return f.plan, f.err
 }
 
@@ -68,7 +68,7 @@ type fakeLLM struct {
 	err    error
 }
 
-func (f fakeLLM) Interpret(context.Context, string, []core.Capability) (core.Intent, error) {
+func (f fakeLLM) Interpret(context.Context, string, []core.Capability, []core.Event) (core.Intent, error) {
 	return f.intent, f.err
 }
 

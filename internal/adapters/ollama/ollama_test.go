@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/xebastian153/hyprvalet/internal/core"
 )
@@ -39,7 +40,7 @@ func TestInterpretParsesIntent(t *testing.T) {
 	defer ts.Close()
 
 	intent, err := New(ts.URL, "test-model").Interpret(
-		context.Background(), "go to workspace 3", nil)
+		context.Background(), "go to workspace 3", nil, nil)
 	if err != nil {
 		t.Fatalf("Interpret: %v", err)
 	}
@@ -63,7 +64,7 @@ func TestInterpretNoMatchIsEmptyNotError(t *testing.T) {
 	ts := mockOllama(t, `{"capability":"","reasoning":"nothing fits"}`, nil)
 	defer ts.Close()
 
-	intent, err := New(ts.URL, "m").Interpret(context.Background(), "make me a sandwich", nil)
+	intent, err := New(ts.URL, "m").Interpret(context.Background(), "make me a sandwich", nil, nil)
 	if err != nil {
 		t.Fatalf("no-match must not error: %v", err)
 	}
@@ -78,7 +79,7 @@ func TestInterpretHTTPError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	if _, err := New(ts.URL, "missing").Interpret(context.Background(), "x", nil); err == nil {
+	if _, err := New(ts.URL, "missing").Interpret(context.Background(), "x", nil, nil); err == nil {
 		t.Fatal("a non-200 response must be an error")
 	}
 }
@@ -87,7 +88,7 @@ func TestInterpretBadContent(t *testing.T) {
 	ts := mockOllama(t, `this is not intent json`, nil)
 	defer ts.Close()
 
-	if _, err := New(ts.URL, "m").Interpret(context.Background(), "x", nil); err == nil {
+	if _, err := New(ts.URL, "m").Interpret(context.Background(), "x", nil, nil); err == nil {
 		t.Fatal("unparseable model content must be an error")
 	}
 }
@@ -98,8 +99,8 @@ func TestPromptsListCapabilities(t *testing.T) {
 		name   string
 		prompt string
 	}{
-		{"intent prompt", buildIntentPrompt(caps)},
-		{"plan prompt", buildPlanPrompt(caps)},
+		{"intent prompt", buildIntentPrompt(caps, nil)},
+		{"plan prompt", buildPlanPrompt(caps, nil)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if !strings.Contains(tt.prompt, "demo.thing") {
@@ -120,7 +121,7 @@ func TestPlanParsesSteps(t *testing.T) {
 	ts := mockOllama(t, content, &got)
 	defer ts.Close()
 
-	plan, err := New(ts.URL, "m").Plan(context.Background(), "set up my work env", nil)
+	plan, err := New(ts.URL, "m").Plan(context.Background(), "set up my work env", nil, nil)
 	if err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
@@ -148,12 +149,40 @@ func TestPlanEmptyStepsIsNotError(t *testing.T) {
 	ts := mockOllama(t, `{"summary":"cannot do that","steps":[]}`, nil)
 	defer ts.Close()
 
-	plan, err := New(ts.URL, "m").Plan(context.Background(), "brew coffee", nil)
+	plan, err := New(ts.URL, "m").Plan(context.Background(), "brew coffee", nil, nil)
 	if err != nil {
 		t.Fatalf("empty plan must not error: %v", err)
 	}
 	if len(plan.Steps) != 0 {
 		t.Fatalf("expected 0 steps, got %d", len(plan.Steps))
+	}
+}
+
+func TestPromptCarriesRecentActions(t *testing.T) {
+	var got chatRequest
+	ts := mockOllama(t, `{"capability":""}`, &got)
+	defer ts.Close()
+
+	recent := []core.Event{{
+		At:   time.Now().Add(-2 * time.Minute),
+		Kind: core.EventRan,
+		Cap:  "workspace.switch",
+		Args: core.Args{"workspace": "3"},
+	}}
+	if _, err := New(ts.URL, "m").Interpret(context.Background(), "go back", nil, recent); err != nil {
+		t.Fatalf("Interpret: %v", err)
+	}
+	system := got.Messages[0].Content
+	if !strings.Contains(system, "ran workspace.switch workspace=3") {
+		t.Fatalf("system prompt is missing the episodic memory:\n%s", system)
+	}
+
+	// No memory, no memory section: the prompt only grows when there is a past.
+	if _, err := New(ts.URL, "m").Interpret(context.Background(), "x", nil, nil); err != nil {
+		t.Fatalf("Interpret: %v", err)
+	}
+	if strings.Contains(got.Messages[0].Content, "recent actions") {
+		t.Fatal("empty memory must not add a recent-actions section")
 	}
 }
 

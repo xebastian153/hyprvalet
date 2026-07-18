@@ -20,12 +20,15 @@ type Intent struct {
 // a concrete model, prompt format, or HTTP client. Interpret maps a
 // natural-language request to a single typed Intent, choosing only from the
 // capabilities it is given — so the caller controls what the model may pick.
+// recent is the agent's episodic memory — the latest audit events, oldest first
+// — so references to the past ("again", "back") can resolve; nil means no
+// memory, never an error.
 //
 // A returned error means the reasoning itself failed (model unreachable,
 // timeout, unparseable output). A successful call that simply found no match
 // returns an Intent with an empty Capability, not an error.
 type LLMPort interface {
-	Interpret(ctx context.Context, request string, caps []Capability) (Intent, error)
+	Interpret(ctx context.Context, request string, caps []Capability, recent []Event) (Intent, error)
 }
 
 // ResolveIntent validates a model-produced Intent against the registry. This is

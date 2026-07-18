@@ -39,3 +39,25 @@ type EventStore interface {
 	// Tail returns up to n most recent events, oldest first.
 	Tail(n int) ([]Event, error)
 }
+
+// The event log doubles as the agent's episodic memory: the reasoning ports are
+// shown the recent past so "again", "back", or "the one you denied" resolve to
+// concrete actions. Memory is bounded twice — at most MemoryEvents entries, none
+// older than MemoryWindow — so the model sees a short, current story, not an
+// unbounded transcript.
+const (
+	MemoryEvents = 10
+	MemoryWindow = time.Hour
+)
+
+// RecentEvents filters events to those within window of now, preserving order.
+// It is pure so the memory horizon is testable without a clock or a file.
+func RecentEvents(events []Event, now time.Time, window time.Duration) []Event {
+	var recent []Event
+	for _, e := range events {
+		if now.Sub(e.At) <= window {
+			recent = append(recent, e)
+		}
+	}
+	return recent
+}

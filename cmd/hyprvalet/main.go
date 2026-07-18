@@ -59,6 +59,17 @@ func emitEvent(kind core.EventKind, cap string, args core.Args, detail string) {
 	}
 }
 
+// recentEvents returns the agent's episodic memory for the reasoning layer.
+// Memory is a nice-to-have, never a gate: any failure reads as an empty past.
+func recentEvents() []core.Event {
+	list, err := events.Tail(core.MemoryEvents)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not read recent events: %v\n", err)
+		return nil
+	}
+	return core.RecentEvents(list, time.Now(), core.MemoryWindow)
+}
+
 func main() {
 	reg := buildRegistry()
 
@@ -525,7 +536,7 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 	// The model may choose from every capability; the allowlist and the gate,
 	// not the prompt, are what keep a wrong choice safe.
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-	intent, err := ollama.Default().Interpret(ctx, request, reg.List())
+	intent, err := ollama.Default().Interpret(ctx, request, reg.List(), recentEvents())
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "reasoning failed: %v\n", err)
@@ -580,7 +591,7 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	plan, err := ollama.Default().Plan(ctx, request, reg.List())
+	plan, err := ollama.Default().Plan(ctx, request, reg.List(), recentEvents())
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "planning failed: %v\n", err)

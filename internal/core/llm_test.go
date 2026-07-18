@@ -12,7 +12,7 @@ type stubLLM struct {
 	err    error
 }
 
-func (s stubLLM) Interpret(context.Context, string, []Capability) (Intent, error) {
+func (s stubLLM) Interpret(context.Context, string, []Capability, []Event) (Intent, error) {
 	return s.intent, s.err
 }
 
@@ -51,13 +51,13 @@ func TestResolveIntent(t *testing.T) {
 func TestLLMPortContract(t *testing.T) {
 	// A returned error surfaces as a reasoning failure.
 	llm := stubLLM{err: context.DeadlineExceeded}
-	if _, err := llm.Interpret(context.Background(), "anything", nil); err == nil {
+	if _, err := llm.Interpret(context.Background(), "anything", nil, nil); err == nil {
 		t.Fatal("expected the stub to propagate its error")
 	}
 
 	// A successful "no match" is an empty Intent, not an error.
 	llm = stubLLM{intent: Intent{Capability: ""}}
-	got, err := llm.Interpret(context.Background(), "do something impossible", nil)
+	got, err := llm.Interpret(context.Background(), "do something impossible", nil, nil)
 	if err != nil {
 		t.Fatalf("no-match must not be an error: %v", err)
 	}

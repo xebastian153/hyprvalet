@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -150,8 +151,8 @@ func (c *Client) chat(ctx context.Context, system, user string, format json.RawM
 }
 
 // Interpret maps a request to one capability. It satisfies core.LLMPort.
-func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capability) (core.Intent, error) {
-	content, err := c.chat(ctx, buildIntentPrompt(caps), request, intentSchema)
+func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Intent, error) {
+	content, err := c.chat(ctx, buildIntentPrompt(caps, recent), request, intentSchema)
 	if err != nil {
 		return core.Intent{}, err
 	}
@@ -172,8 +173,8 @@ func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capa
 
 // Plan maps a request to an ordered plan of capability steps. It satisfies
 // core.PlannerPort. A request the model cannot fulfill returns an empty plan.
-func (c *Client) Plan(ctx context.Context, request string, caps []core.Capability) (core.Plan, error) {
-	content, err := c.chat(ctx, buildPlanPrompt(caps), request, planSchema)
+func (c *Client) Plan(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Plan, error) {
+	content, err := c.chat(ctx, buildPlanPrompt(caps, recent), request, planSchema)
 	if err != nil {
 		return core.Plan{}, err
 	}
@@ -212,22 +213,50 @@ func capabilityList(caps []core.Capability) string {
 	return b.String()
 }
 
-func buildIntentPrompt(caps []core.Capability) string {
+// recentActions renders the agent's episodic memory for the system prompt: what
+// ran or was refused lately, oldest first, so the model can resolve references
+// like "again" or "back" against concrete actions instead of guessing. Empty
+// memory renders nothing — the prompt only grows when there is a past to tell.
+func recentActions(recent []core.Event, now time.Time) string {
+	if len(recent) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nYour recent actions, most recent first:\n")
+	for i := len(recent) - 1; i >= 0; i-- {
+		e := recent[i]
+		age := now.Sub(e.At).Round(time.Second)
+		args := make([]string, 0, len(e.Args))
+		for k, v := range e.Args {
+			args = append(args, fmt.Sprintf("%s=%s", k, v))
+		}
+		sort.Strings(args)
+		fmt.Fprintf(&b, "%d. %s ago: %s %s %s\n", len(recent)-i, age, e.Kind, e.Cap, strings.Join(args, " "))
+	}
+	b.WriteString("When the request refers to a past action, resolve it against this history. ")
+	b.WriteString("Every argument value must be a literal value copied from the history or the request ")
+	b.WriteString("(a number like 3, a name like firefox) — never a description of one.\n")
+	return b.String()
+}
+
+func buildIntentPrompt(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
 	b.WriteString("You translate a user's desktop request into exactly one capability from the list below.\n")
 	b.WriteString("Choose the single capability whose action best matches the request and fill its arguments.\n")
 	b.WriteString("If no capability matches, return an empty string for \"capability\".\n")
 	b.WriteString("Never invent a capability id or an argument name that is not listed. Argument values are strings.\n\n")
 	b.WriteString(capabilityList(caps))
+	b.WriteString(recentActions(recent, time.Now()))
 	return b.String()
 }
 
-func buildPlanPrompt(caps []core.Capability) string {
+func buildPlanPrompt(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
 	b.WriteString("You turn a user's desktop request into an ordered plan of one or more capability calls from the list below.\n")
 	b.WriteString("Use as many steps as the request needs, in the order they should run, and fill each step's arguments.\n")
 	b.WriteString("Use only capability ids and argument names from the list. If the request cannot be done with these capabilities, return an empty steps array.\n")
 	b.WriteString("Also give a one-line summary of the plan. Each argument value is a plain string with no surrounding braces or quotes — a workspace is 3, not {3} or \"3\".\n\n")
 	b.WriteString(capabilityList(caps))
+	b.WriteString(recentActions(recent, time.Now()))
 	return b.String()
 }
