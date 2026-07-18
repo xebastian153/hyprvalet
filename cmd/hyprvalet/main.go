@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math/rand"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -945,7 +946,7 @@ func voiceCmd() {
 	// instead of waiting in silence. When a command came with the wake word,
 	// it gets on with it rather than greeting.
 	if pending == "" {
-		say(plain, phrase("greeting"))
+		say(plain, greeting())
 	}
 
 	for {
@@ -1338,7 +1339,6 @@ var spokenPhrases = map[string]map[string]string{
 		"bye":       "Goodbye.",
 		"confirm":   "Shall I proceed?",
 		"attending": "Sir?",
-		"greeting":  "How may I help you, sir?",
 	},
 	"Spanish": {
 		"done":      "Listo.",
@@ -1348,8 +1348,39 @@ var spokenPhrases = map[string]map[string]string{
 		"bye":       "Hasta luego.",
 		"confirm":   "¿Procedo?",
 		"attending": "¿Señor?",
-		"greeting":  "¿En qué puedo ayudarle, señor?",
 	},
+}
+
+// greetings are the varied ways the assistant announces it is listening when
+// the conversation opens — a butler does not greet with the same words twice.
+var greetings = map[string][]string{
+	"English": {
+		"How may I help you, sir?",
+		"At your service, sir.",
+		"Yes, sir? I'm listening.",
+		"How can I be of service?",
+		"Sir? What do you need?",
+		"Here, sir. Go ahead.",
+	},
+	"Spanish": {
+		"¿En qué puedo ayudarle, señor?",
+		"A sus órdenes, señor.",
+		"¿Sí, señor? Le escucho.",
+		"¿Qué necesita, señor?",
+		"Aquí estoy, señor. Diga.",
+		"Cuénteme, señor.",
+		"¿En qué le sirvo, señor?",
+	},
+}
+
+// greeting picks a random opening line for the configured language, falling
+// back to English.
+func greeting() string {
+	set := greetings[strings.TrimSpace(os.Getenv("HYPRVALET_LANG"))]
+	if len(set) == 0 {
+		set = greetings["English"]
+	}
+	return set[rand.Intn(len(set))]
 }
 
 // phrase resolves one fixed spoken sentence for the configured language,
