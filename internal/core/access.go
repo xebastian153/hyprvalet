@@ -11,6 +11,8 @@ const (
 	AccessWindow    AccessKind = "window"
 	AccessWorkspace AccessKind = "workspace"
 	AccessCommand   AccessKind = "command"
+	AccessMedia     AccessKind = "media" // playback control (play/pause/skip)
+	AccessAudio     AccessKind = "audio" // volume and mute
 )
 
 // Risk is the built-in risk tier of a capability. It feeds the permission gate:

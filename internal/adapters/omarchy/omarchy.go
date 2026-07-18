@@ -14,7 +14,51 @@ import (
 
 // Capabilities returns every Omarchy-backed capability.
 func Capabilities() []core.Capability {
-	return []core.Capability{runCommand{}}
+	return []core.Capability{runCommand{}, openBrowser{}, openMusic{}}
+}
+
+// launch runs one of Omarchy's launcher scripts. They detach the launched app
+// into its own scope (via uwsm), so the daemon never adopts a browser as a
+// child for life.
+func launch(ctx context.Context, bin string, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, bin, args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s: %w: %s", bin, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// openBrowser opens (or focuses) the user's default browser. The command is
+// FIXED — no argument reaches a shell — which is what lets it be Safe-tier
+// where the arbitrary app.open must be Confirm.
+type openBrowser struct{}
+
+func (openBrowser) ID() string              { return "browser.open" }
+func (openBrowser) Description() string     { return "Open (or focus) the default web browser" }
+func (openBrowser) Access() core.AccessKind { return core.AccessApp }
+func (openBrowser) Risk() core.Risk         { return core.RiskSafe }
+func (openBrowser) Params() []string        { return nil }
+func (openBrowser) Run(ctx context.Context, _ core.Args) (string, error) {
+	if out, err := launch(ctx, "omarchy-launch-browser"); err != nil {
+		return out, err
+	}
+	return "opened the browser", nil
+}
+
+// openMusic opens (or focuses) the music player. Fixed command, Safe-tier for
+// the same reason as openBrowser.
+type openMusic struct{}
+
+func (openMusic) ID() string              { return "music.open" }
+func (openMusic) Description() string     { return "Open (or focus) the music player (Spotify)" }
+func (openMusic) Access() core.AccessKind { return core.AccessApp }
+func (openMusic) Risk() core.Risk         { return core.RiskSafe }
+func (openMusic) Params() []string        { return nil }
+func (openMusic) Run(ctx context.Context, _ core.Args) (string, error) {
+	if out, err := launch(ctx, "omarchy-launch-or-focus", "spotify"); err != nil {
+		return out, err
+	}
+	return "opened the music player", nil
 }
 
 type runCommand struct{}

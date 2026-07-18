@@ -22,8 +22,10 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/xebastian153/hyprvalet/internal/adapters/audio"
 	"github.com/xebastian153/hyprvalet/internal/adapters/eventlog"
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
+	"github.com/xebastian153/hyprvalet/internal/adapters/media"
 	"github.com/xebastian153/hyprvalet/internal/adapters/mic"
 	"github.com/xebastian153/hyprvalet/internal/adapters/ollama"
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
@@ -39,6 +41,8 @@ import (
 func buildRegistry() *core.Registry {
 	reg := core.NewRegistry()
 	all := append(hypr.Capabilities(), omarchy.Capabilities()...)
+	all = append(all, media.Capabilities()...)
+	all = append(all, audio.Capabilities()...)
 	for _, c := range all {
 		if err := reg.Register(c); err != nil {
 			// A collision in the allowlist is a build-time mistake, not a
