@@ -189,14 +189,16 @@ func (nightlightToggle) Run(ctx context.Context, _ core.Args) (string, error) {
 	return "toggled the night light", nil
 }
 
-// lockScreen locks the session. Safe: fully reversible with the password, and
-// arguably the one action you WANT reachable fast.
+// lockScreen locks the session. Risk is Confirm, not Safe: it is reversible
+// (with the password) but disruptive — a misheard command must not kick the
+// user out of their session unannounced, as a garbled "what time is it" once
+// did. Locking rarely needs to be instant, so it earns a confirmation.
 type lockScreen struct{}
 
 func (lockScreen) ID() string              { return "system.lock" }
 func (lockScreen) Description() string     { return "Lock the screen" }
 func (lockScreen) Access() core.AccessKind { return core.AccessCommand }
-func (lockScreen) Risk() core.Risk         { return core.RiskSafe }
+func (lockScreen) Risk() core.Risk         { return core.RiskConfirm }
 func (lockScreen) Params() []string        { return nil }
 func (lockScreen) Run(ctx context.Context, _ core.Args) (string, error) {
 	if _, err := omarchyCmd(ctx, "system", "lock"); err != nil {

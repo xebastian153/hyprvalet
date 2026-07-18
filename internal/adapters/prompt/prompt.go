@@ -159,6 +159,12 @@ const persona = "You are hyprvalet, the user's personal voice assistant for this
 	"composed, courteous, quietly witty, never verbose. Address the user respectfully (in Spanish, use \"señor\"). " +
 	"The user may call you Jarvis; answer to it.\n"
 
+// nowLine gives the model the current date and time so questions like "what
+// time is it?" are answered conversationally instead of misrouted to an action.
+func nowLine() string {
+	return "The current date and time is " + time.Now().Format("Monday 2 January 2006, 15:04") + ".\n"
+}
+
 // conversationRule teaches the model the third outcome: talk. A reply is words
 // only — the caller speaks it and executes nothing — so the rule insists an
 // action is preferred whenever one fits. General knowledge is fair game — the
@@ -180,6 +186,7 @@ const conversationRule = "You always fill exactly one of two fields, never both:
 func BuildIntent(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
 	b.WriteString(persona)
+	b.WriteString(nowLine())
 	b.WriteString("You translate a user's desktop request into exactly one capability from the list below.\n")
 	b.WriteString("Respond with only a JSON object shaped {\"capability\": \"\", \"args\": {}, \"reply\": \"\", \"reasoning\": \"\"}.\n")
 	b.WriteString("Choose the single capability whose action best matches the request and fill its arguments.\n")
@@ -198,6 +205,7 @@ func BuildIntent(caps []core.Capability, recent []core.Event) string {
 func BuildPlan(caps []core.Capability, recent []core.Event) string {
 	var b strings.Builder
 	b.WriteString(persona)
+	b.WriteString(nowLine())
 	b.WriteString("You turn a user's desktop request into an ordered plan of one or more capability calls from the list below.\n")
 	b.WriteString("Respond with only a JSON object shaped {\"summary\": \"\", \"steps\": [{\"capability\": \"\", \"args\": {}}]}.\n")
 	b.WriteString("Use as many steps as the request needs, in the order they should run, and fill each step's arguments.\n")
