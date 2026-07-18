@@ -831,6 +831,11 @@ func voiceCmd() {
 	fmt.Println("voice session — speak, then press Enter. Say goodbye (or type q) to leave.")
 
 	for {
+		// A stale recording must never survive into this turn: if the recorder
+		// failed to start, transcribing the previous turn's audio would make
+		// the assistant eerily repeat itself. Delete first, so a failed
+		// recording surfaces as an error instead of an echo.
+		_ = os.Remove(wav)
 		stop, err := mic.Start(wav)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -838,14 +843,16 @@ func voiceCmd() {
 		}
 		fmt.Println("listening…")
 		line, readErr := stdin.ReadString('\n')
-		if err := stop(); err != nil {
-			fmt.Fprintf(os.Stderr, "error: %v\n", err)
-			os.Exit(1)
-		}
+		stopErr := stop()
 		if readErr != nil || strings.TrimSpace(line) == "q" {
 			// Stream closed or an explicit quit: leave without transcribing.
 			say(speaker, phrase("bye"))
 			return
+		}
+		if stopErr != nil {
+			// A dead recording ends the turn, never the session.
+			fmt.Fprintf(os.Stderr, "error: %v\n", stopErr)
+			continue
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

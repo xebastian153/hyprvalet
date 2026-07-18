@@ -51,13 +51,19 @@ func start(bin, target, wavPath string) (func() error, error) {
 		if err := cmd.Process.Signal(os.Interrupt); err != nil {
 			return fmt.Errorf("stopping recording: %w", err)
 		}
-		// The interrupt is the expected exit path, not a failure.
+		// The interrupt is the expected exit path, not a failure — but a
+		// recorder that died at startup (a transient audio-server refusal)
+		// exits the same way. The file is the truth: no audio beyond a WAV
+		// header means nothing was recorded, and the caller must know rather
+		// than transcribe silence — or worse, a stale previous recording.
 		if err := cmd.Wait(); err != nil {
 			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) {
-				return nil
+			if !errors.As(err, &exitErr) {
+				return fmt.Errorf("finishing recording: %w", err)
 			}
-			return fmt.Errorf("finishing recording: %w", err)
+		}
+		if info, err := os.Stat(wavPath); err != nil || info.Size() <= 44 {
+			return fmt.Errorf("recording produced no audio — is the microphone available?")
 		}
 		return nil
 	}, nil
