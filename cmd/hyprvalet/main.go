@@ -1028,7 +1028,7 @@ func voiceCmd() {
 				}
 				return t, true
 			}
-			runPlanning(ctx, idea, plain, ask)
+			runPlanning(ctx, idea, plain, confirm, ask)
 			fmt.Println()
 			continue
 		}
@@ -1180,9 +1180,10 @@ func planningIntent(text string) (idea string, ok bool) {
 
 // runPlanning holds a planning conversation about idea: it asks clarifying
 // questions through ask(), and once the reasoner is satisfied it saves the plan
-// to the assistant's memory and reads it back. ask() returns the user's answer
-// and false if they gave up. speaker may be nil (text-only, for the CLI).
-func runPlanning(ctx context.Context, idea string, speaker speech.Speaker, ask func(question string) (string, bool)) {
+// to the assistant's memory, reads it back, and offers to take it to Claude
+// Code. ask() returns the user's answer and false if they gave up; confirm()
+// gates the handoff. speaker may be nil (text-only, for the CLI).
+func runPlanning(ctx context.Context, idea string, speaker speech.Speaker, confirm func(string) bool, ask func(question string) (string, bool)) {
 	llm := planningReasoner()
 	var transcript strings.Builder
 	fmt.Fprintf(&transcript, "Project idea: %s\n", strings.TrimSpace(idea))
@@ -1204,7 +1205,7 @@ func runPlanning(ctx context.Context, idea string, speaker speech.Speaker, ask f
 			return
 		}
 		if turn.Plan != nil {
-			finishPlan(*turn.Plan, speaker)
+			finishPlan(ctx, *turn.Plan, speaker, confirm)
 			return
 		}
 		fmt.Printf("jarvis: %s\n", turn.Question)
@@ -1237,20 +1238,123 @@ func brainstormCmd(args []string) {
 		}
 		return line, true
 	}
-	runPlanning(context.Background(), idea, nil, ask)
+	confirm := func(q string) bool {
+		fmt.Printf("%s [y/N] ", q)
+		if !reader.Scan() {
+			return false
+		}
+		switch strings.ToLower(strings.TrimSpace(reader.Text())) {
+		case "y", "yes", "s", "si", "sí", "o":
+			return true
+		}
+		return false
+	}
+	runPlanning(context.Background(), idea, nil, confirm, ask)
 }
 
-// finishPlan saves a completed plan to the assistant's memory and reads it back,
-// leaving the handoff to Claude Code for when the user asks.
-func finishPlan(plan prompt.ProjectPlan, speaker speech.Speaker) {
+// finishPlan saves a completed plan to the assistant's memory, reads it back,
+// and offers to take it to Claude Code.
+func finishPlan(ctx context.Context, plan prompt.ProjectPlan, speaker speech.Speaker, confirm func(string) bool) {
 	if err := memory.Default().Remember(plan.Note()); err != nil {
 		fmt.Fprintln(os.Stderr, "could not save plan:", err)
 	}
 	fmt.Printf("plan: %s\n", plan.Note())
 	say(speaker, plan.Summary())
-	say(speaker, pick(
-		"I've saved the plan. When you're ready, we can open it in Claude Code.",
-		"Guardé el plan, señor. Cuando quiera, lo abrimos en Claude Code."))
+
+	say(speaker, pick("Shall I open it in Claude Code and give it the plan?",
+		"¿Lo abro en Claude Code y le paso el plan, señor?"))
+	if confirm("open it in Claude Code?") {
+		doHandoff(ctx, plan, speaker, confirm)
+		return
+	}
+	say(speaker, pick("Saved. When you're ready, we can take it to Claude Code.",
+		"Guardado, señor. Cuando quiera, lo llevamos a Claude Code."))
+}
+
+// doHandoff opens the project in Claude Code and relays the plan to it — the
+// assistant taking what you decided together and getting Claude started. Both
+// steps stay gated: the user approves opening Claude, and approves the message
+// that goes to it (heard first, thanks to the read-back). Claude's own
+// folder-trust prompt is the user's to answer; the assistant never auto-answers
+// it.
+func doHandoff(ctx context.Context, plan prompt.ProjectPlan, speaker speech.Speaker, confirm func(string) bool) {
+	if !runGated("project.new", map[string]string{"name": plan.Name}, speaker, confirm) {
+		return
+	}
+	say(speaker, pick("Claude is starting up.", "Claude está arrancando, señor."))
+	if !waitForClaude(ctx, speaker) {
+		say(speaker, pick("When Claude is ready, tell me to send it the plan.",
+			"Cuando Claude esté lista, dígame y le paso el plan, señor."))
+		return
+	}
+	if runGated("terminal.send", map[string]string{"text": plan.Handoff()}, speaker, confirm) {
+		say(speaker, pick("Claude has the plan. I'll let you know how it goes.",
+			"Claude ya tiene el plan, señor. Le aviso cómo va."))
+	}
+}
+
+// runGated runs one capability through the daemon's confirm flow and reports
+// whether it ran. Reused by the handoff so opening Claude and relaying the plan
+// stay individually approved. The read-back announces a relayed message first.
+func runGated(cap string, args map[string]string, speaker speech.Speaker, confirm func(string) bool) bool {
+	announcePayload(speaker, cap, args)
+	run, err := daemon.RunViaDaemon(daemon.SocketPath(), cap, args, func(reason string) bool {
+		return confirm(reason + " — proceed?")
+	})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		say(speaker, phrase("stopped"))
+		return false
+	}
+	switch run.Status {
+	case protocol.StatusRan:
+		if run.Text != "" {
+			fmt.Println(run.Text)
+		}
+		return true
+	case protocol.StatusDenied:
+		fmt.Fprintf(os.Stderr, "denied: %s\n", run.Text)
+		say(speaker, phrase("denied"))
+		return false
+	default:
+		fmt.Fprintf(os.Stderr, "error: %s\n", run.Error)
+		say(speaker, phrase("stopped"))
+		return false
+	}
+}
+
+// waitForClaude polls the just-opened Claude terminal until it is ready to
+// receive the plan. A folder-trust prompt is surfaced to the user (theirs to
+// approve) rather than answered; once it clears — or Claude is already at its
+// prompt — the relay may proceed. Returns false if Claude never became ready.
+func waitForClaude(ctx context.Context, speaker speech.Speaker) bool {
+	warnedTrust := false
+	for attempt := 0; attempt < 25; attempt++ {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(time.Second):
+		}
+		content, err := terminal.Capture(ctx, 25)
+		if err != nil || strings.TrimSpace(content) == "" {
+			continue // the session is not up yet
+		}
+		low := strings.ToLower(content)
+		if strings.Contains(low, "trust") &&
+			(strings.Contains(low, "folder") || strings.Contains(low, "carpeta") || strings.Contains(low, "confía")) {
+			if !warnedTrust {
+				say(speaker, pick("Claude is asking to trust the folder — approve it in the window.",
+					"Claude pregunta si confía en la carpeta — apruébelo en la ventana, señor."))
+				warnedTrust = true
+			}
+			continue
+		}
+		if attempt < 3 {
+			continue // give Claude a few seconds to finish rendering its input
+		}
+		return true // at its prompt, trust resolved
+	}
+	return false
 }
 
 // terminalKeywords mark a request as being about the Claude terminal — the only
