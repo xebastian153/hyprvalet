@@ -14,7 +14,19 @@ import (
 
 // Capabilities returns every Omarchy-backed capability.
 func Capabilities() []core.Capability {
-	return []core.Capability{runCommand{}, openBrowser{}, openMusic{}}
+	return []core.Capability{
+		runCommand{}, openBrowser{}, openMusic{},
+		takeScreenshot{}, themeNext{}, themeSet{}, nightlightToggle{}, lockScreen{},
+	}
+}
+
+// omarchyCmd runs one omarchy CLI subcommand with fixed, typed arguments.
+func omarchyCmd(ctx context.Context, args ...string) (string, error) {
+	out, err := exec.CommandContext(ctx, "omarchy", args...).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("omarchy %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // launch runs one of Omarchy's launcher scripts. They detach the launched app
@@ -43,6 +55,120 @@ func (openBrowser) Run(ctx context.Context, _ core.Args) (string, error) {
 		return out, err
 	}
 	return "opened the browser", nil
+}
+
+// takeScreenshot captures the full screen non-interactively — a voice command
+// cannot drag a region selector.
+type takeScreenshot struct{}
+
+func (takeScreenshot) ID() string              { return "screenshot.take" }
+func (takeScreenshot) Description() string     { return "Take a fullscreen screenshot" }
+func (takeScreenshot) Access() core.AccessKind { return core.AccessCommand }
+func (takeScreenshot) Risk() core.Risk         { return core.RiskSafe }
+func (takeScreenshot) Params() []string        { return nil }
+func (takeScreenshot) Run(ctx context.Context, _ core.Args) (string, error) {
+	if _, err := omarchyCmd(ctx, "capture", "screenshot", "fullscreen"); err != nil {
+		return "", err
+	}
+	return "took a screenshot", nil
+}
+
+// themeNext cycles to the next theme.
+type themeNext struct{}
+
+func (themeNext) ID() string              { return "theme.next" }
+func (themeNext) Description() string     { return "Switch to the next desktop theme" }
+func (themeNext) Access() core.AccessKind { return core.AccessCommand }
+func (themeNext) Risk() core.Risk         { return core.RiskSafe }
+func (themeNext) Params() []string        { return nil }
+func (themeNext) Run(ctx context.Context, _ core.Args) (string, error) {
+	if _, err := omarchyCmd(ctx, "theme", "next"); err != nil {
+		return "", err
+	}
+	return "switched to the next theme", nil
+}
+
+// themeSet applies a named theme. The name is validated against the LIVE list
+// of installed themes — a dynamic allowlist. A hallucinated theme dies here
+// with a corrective error that carries the real options, which the retry loop
+// feeds back so the model can pick one that exists.
+type themeSet struct{}
+
+func (themeSet) ID() string              { return "theme.set" }
+func (themeSet) Description() string     { return "Apply a desktop theme by name" }
+func (themeSet) Access() core.AccessKind { return core.AccessCommand }
+func (themeSet) Risk() core.Risk         { return core.RiskSafe }
+func (themeSet) Params() []string        { return []string{"name"} }
+func (themeSet) Run(ctx context.Context, args core.Args) (string, error) {
+	want := strings.TrimSpace(args["name"])
+	if want == "" {
+		return "", core.Validationf("missing required arg %q (a theme name)", "name")
+	}
+	list, err := omarchyCmd(ctx, "theme", "list")
+	if err != nil {
+		return "", err
+	}
+	name, err := matchTheme(want, strings.Split(list, "\n"))
+	if err != nil {
+		return "", err
+	}
+	if _, err := omarchyCmd(ctx, "theme", "set", name); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("applied theme %s", name), nil
+}
+
+// matchTheme resolves a requested theme against the installed list,
+// case-insensitively and tolerating space/underscore/hyphen differences.
+func matchTheme(want string, installed []string) (string, error) {
+	canon := func(s string) string {
+		s = strings.ToLower(strings.TrimSpace(s))
+		s = strings.NewReplacer(" ", "", "_", "", "-", "").Replace(s)
+		return s
+	}
+	var names []string
+	for _, line := range installed {
+		name := strings.TrimSpace(line)
+		if name == "" {
+			continue
+		}
+		names = append(names, name)
+		if canon(name) == canon(want) {
+			return name, nil
+		}
+	}
+	return "", core.Validationf("unknown theme %q — installed themes are: %s", want, strings.Join(names, ", "))
+}
+
+// nightlightToggle toggles the blue-light filter.
+type nightlightToggle struct{}
+
+func (nightlightToggle) ID() string              { return "nightlight.toggle" }
+func (nightlightToggle) Description() string     { return "Toggle the night light (blue-light filter)" }
+func (nightlightToggle) Access() core.AccessKind { return core.AccessCommand }
+func (nightlightToggle) Risk() core.Risk         { return core.RiskSafe }
+func (nightlightToggle) Params() []string        { return nil }
+func (nightlightToggle) Run(ctx context.Context, _ core.Args) (string, error) {
+	if _, err := omarchyCmd(ctx, "toggle", "nightlight"); err != nil {
+		return "", err
+	}
+	return "toggled the night light", nil
+}
+
+// lockScreen locks the session. Safe: fully reversible with the password, and
+// arguably the one action you WANT reachable fast.
+type lockScreen struct{}
+
+func (lockScreen) ID() string              { return "system.lock" }
+func (lockScreen) Description() string     { return "Lock the screen" }
+func (lockScreen) Access() core.AccessKind { return core.AccessCommand }
+func (lockScreen) Risk() core.Risk         { return core.RiskSafe }
+func (lockScreen) Params() []string        { return nil }
+func (lockScreen) Run(ctx context.Context, _ core.Args) (string, error) {
+	if _, err := omarchyCmd(ctx, "system", "lock"); err != nil {
+		return "", err
+	}
+	return "locked the screen", nil
 }
 
 // openMusic opens (or focuses) the music player. Fixed command, Safe-tier for

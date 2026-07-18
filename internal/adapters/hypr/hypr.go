@@ -19,7 +19,42 @@ func Capabilities() []core.Capability {
 		switchWorkspace{},
 		moveWindowToWorkspace{},
 		openApp{},
+		closeWindow{},
+		fullscreenWindow{},
 	}
+}
+
+// closeWindow closes the active window. Risk is Confirm, not Safe: a close can
+// discard unsaved work, and "the active window" at execution time may not be
+// the one the user meant. A user who accepts the risk can downgrade it to
+// allow in their policy.
+type closeWindow struct{}
+
+func (closeWindow) ID() string              { return "window.close" }
+func (closeWindow) Description() string     { return "Close the active window" }
+func (closeWindow) Access() core.AccessKind { return core.AccessWindow }
+func (closeWindow) Risk() core.Risk         { return core.RiskConfirm }
+func (closeWindow) Params() []string        { return nil }
+func (closeWindow) Run(ctx context.Context, _ core.Args) (string, error) {
+	if _, err := dispatch(ctx, "killactive"); err != nil {
+		return "", err
+	}
+	return "closed the active window", nil
+}
+
+// fullscreenWindow toggles fullscreen on the active window.
+type fullscreenWindow struct{}
+
+func (fullscreenWindow) ID() string              { return "window.fullscreen" }
+func (fullscreenWindow) Description() string     { return "Toggle fullscreen on the active window" }
+func (fullscreenWindow) Access() core.AccessKind { return core.AccessWindow }
+func (fullscreenWindow) Risk() core.Risk         { return core.RiskSafe }
+func (fullscreenWindow) Params() []string        { return nil }
+func (fullscreenWindow) Run(ctx context.Context, _ core.Args) (string, error) {
+	if _, err := dispatch(ctx, "fullscreen"); err != nil {
+		return "", err
+	}
+	return "toggled fullscreen", nil
 }
 
 // dispatch runs `hyprctl dispatch <args...>` and returns trimmed output.
