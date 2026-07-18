@@ -53,7 +53,7 @@ flowchart LR
 
     subgraph BR["🧠 Razonamiento · puertos"]
         direction TB
-        GQ["Groq<br/>gpt-oss-120b"] -. "respaldo" .-> OL["Ollama<br/>local"]
+        GQ["Groq<br/>gpt-oss-120b"] -.-> OL["Ollama<br/>local · respaldo"]
     end
 
     subgraph GT["🔒 Gate de permisos · core"]
@@ -66,10 +66,10 @@ flowchart LR
         CA["hyprctl · omarchy<br/>tmux · web · …"]
     end
 
-    STT -->|"lenguaje natural"| BR
-    BR -->|"intención / plan tipado"| GT
-    GT -->|"permitido"| EX
-    GT -. "negado / te consulta" .-> TTS
+    STT -->|lenguaje natural| BR
+    BR -->|intención tipada| GT
+    GT -->|permitido| EX
+    GT -.-> TTS
     EX --> TTS["🔊 Texto a voz<br/>ElevenLabs → Edge → piper"]
 ```
 
@@ -91,7 +91,7 @@ flowchart TB
 
     subgraph CORE["🧩 core — dominio puro, sin dependencias de herramientas"]
         direction TB
-        REG["Registro<br/><i>el allowlist</i>"]
+        REG["Registro<br/>el allowlist"]
         CAP["Capability · AccessKind · Risk"]
         POL["Política · Armado · Sesión"]
         AUD["Log de auditoría · Memoria episódica"]
@@ -107,7 +107,7 @@ flowchart TB
         direction TB
         REASON["ollama · groq · fallback"]
         DESKTOP["hypr · omarchy · media · audio · web"]
-        BRIDGE["project · terminal<br/><i>puente con Claude Code</i>"]
+        BRIDGE["project · terminal<br/>puente con Claude Code"]
     end
 
     CLI --> CORE
