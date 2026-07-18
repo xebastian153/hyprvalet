@@ -43,12 +43,13 @@ func PlanViaDaemon(socketPath, request string) (protocol.Response, error) {
 	return Send(socketPath, protocol.Request{Op: protocol.OpPlan, Text: request})
 }
 
-// RunStep runs one already-approved plan step through the daemon. The whole plan
-// was confirmed up front, so it sends Approved directly; the daemon still
-// re-evaluates the step against live state (TOCTOU), so a grant that expired
-// since the preview blocks it instead of slipping through on the stale approval.
-func RunStep(socketPath, cap string, args map[string]string) (protocol.Response, error) {
-	return Send(socketPath, protocol.Request{Op: protocol.OpRun, Cap: cap, Args: args, Approved: true})
+// RunStep runs one plan step through the daemon. approved carries whether a
+// human confirmed the plan — a plan of purely policy-allowed steps runs
+// unapproved, so a doom-loop can still interpose. The daemon re-evaluates
+// every step against live state (TOCTOU) either way; approval never outlives
+// the world it was given in.
+func RunStep(socketPath, cap string, args map[string]string, approved bool) (protocol.Response, error) {
+	return Send(socketPath, protocol.Request{Op: protocol.OpRun, Cap: cap, Args: args, Approved: approved})
 }
 
 // Send is the thin client: it opens a connection to the daemon at socketPath,

@@ -816,10 +816,45 @@ var farewells = map[string]bool{
 }
 
 // affirmatives are the spoken ways to approve a plan. Anything else is a no —
-// a confirmation gate fails closed, in voice exactly as on a keyboard.
+// a confirmation gate fails closed, in voice exactly as on a keyboard. The set
+// includes what speech recognition typically makes of a bare "sí" ("see",
+// "c"), because a gate that cannot hear yes is just a locked door.
 var affirmatives = map[string]bool{
 	"sí": true, "si": true, "dale": true, "claro": true, "hacelo": true,
 	"confirmo": true, "yes": true, "yep": true, "ok": true, "okay": true, "sure": true,
+	"see": true, "c": true, "sea": true,
+}
+
+// negatives immediately decline — an explicit no must never be outweighed by a
+// stray affirmative word elsewhere in the sentence.
+var negatives = map[string]bool{"no": true, "nope": true, "cancel": true, "cancelalo": true}
+
+// isAffirmative scans the normalized words of a transcript: any negative
+// declines, otherwise any affirmative approves. Whole-sentence answers ("sí,
+// dale") pass; anything ambiguous fails closed.
+func isAffirmative(text string) bool {
+	for _, w := range strings.Fields(strings.ToLower(text)) {
+		if negatives[strings.Trim(w, ".,!?¡¿")] {
+			return false
+		}
+	}
+	for _, w := range strings.Fields(strings.ToLower(text)) {
+		if affirmatives[strings.Trim(w, ".,!?¡¿")] {
+			return true
+		}
+	}
+	return false
+}
+
+// planNeedsConfirmation reports whether any step still requires a human: a
+// plan of purely policy-allowed steps is pre-authorized.
+func planNeedsConfirmation(steps []protocol.PlanStep) bool {
+	for _, s := range steps {
+		if s.Decision != core.DecisionAllow.String() {
+			return true
+		}
+	}
+	return false
 }
 
 // voiceCmd is the voice frontend: a HANDS-FREE conversational session. Voice
@@ -904,7 +939,7 @@ func voiceConfirm(ctx context.Context, speaker speech.Speaker, question, wav str
 		return false
 	}
 	fmt.Printf("heard: %s\n", text)
-	return affirmatives[normalizeUtterance(text)]
+	return isAffirmative(text)
 }
 
 // normalizeUtterance lowers and strips punctuation/accents-adjacent noise so a
@@ -1184,9 +1219,19 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker, confirm func(s
 	if !execute {
 		return true // `ctl plan` previews only
 	}
-	if !confirm(fmt.Sprintf("execute this %d-step plan?", len(resp.Plan))) {
-		fmt.Println("aborted")
-		return true
+
+	// A plan whose every step the policy already ALLOWS needs no plan-level
+	// confirmation — the gate authorized it; asking again is friction, not
+	// safety. Any ask-tier step keeps the human in the loop. Skipped
+	// confirmation means steps run unapproved, so a doom-loop can still stop
+	// the plan.
+	approved := false
+	if planNeedsConfirmation(resp.Plan) {
+		if !confirm(fmt.Sprintf("execute this %d-step plan?", len(resp.Plan))) {
+			fmt.Println("aborted")
+			return true
+		}
+		approved = true
 	}
 
 	n := len(resp.Plan)
@@ -1194,7 +1239,7 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker, confirm func(s
 		if i > 0 {
 			time.Sleep(stepPause)
 		}
-		run, err := daemon.RunStep(daemon.SocketPath(), s.Cap, s.Args)
+		run, err := daemon.RunStep(daemon.SocketPath(), s.Cap, s.Args, approved)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %v\n", i+1, n, s.Cap, err)
 			say(speaker, phrase("stopped"))

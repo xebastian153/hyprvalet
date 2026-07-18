@@ -57,9 +57,14 @@ func (c *Client) Transcribe(ctx context.Context, wavPath string) (string, error)
 			c.model, c.model)
 	}
 
-	// -nt: no timestamps; -l auto: detect language. Stdout carries only the
-	// transcript lines; diagnostics go to stderr.
-	cmd := exec.CommandContext(ctx, c.bin, "-m", c.model, "-f", wavPath, "-nt", "-l", "auto")
+	// -nt: no timestamps. Language defaults to auto-detection; HYPRVALET_STT_LANG
+	// pins it (e.g. "es") — auto-detection guesses wrong on one-word utterances
+	// like a spoken "sí", which matters when that word is a confirmation.
+	lang := strings.TrimSpace(os.Getenv("HYPRVALET_STT_LANG"))
+	if lang == "" {
+		lang = "auto"
+	}
+	cmd := exec.CommandContext(ctx, c.bin, "-m", c.model, "-f", wavPath, "-nt", "-l", lang)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
