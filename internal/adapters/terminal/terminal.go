@@ -36,6 +36,22 @@ func (readTerminal) Access() core.AccessKind { return core.AccessCommand }
 func (readTerminal) Risk() core.Risk         { return core.RiskSafe }
 func (readTerminal) Params() []string        { return nil }
 func (readTerminal) Run(ctx context.Context, _ core.Args) (string, error) {
+	text, err := Capture(ctx, readLines)
+	if err != nil {
+		return "", err
+	}
+	if text == "" {
+		return "the terminal is empty", nil
+	}
+	return text, nil
+}
+
+// Capture returns the last n meaningful lines of the most-recently-active
+// Claude terminal, cleaned of TUI decoration. It is the shared read used both
+// by the terminal.read capability and by the reasoning layer, which folds this
+// into the prompt so the assistant can explain what Claude is doing rather than
+// merely recite it. A corrective error means there is nothing to read.
+func Capture(ctx context.Context, n int) (string, error) {
 	session, err := activeSession(ctx)
 	if err != nil {
 		return "", err
@@ -44,11 +60,7 @@ func (readTerminal) Run(ctx context.Context, _ core.Args) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("reading the terminal: %w", err)
 	}
-	text := cleanCapture(string(out), readLines)
-	if text == "" {
-		return "the terminal is empty", nil
-	}
-	return text, nil
+	return cleanCapture(string(out), n), nil
 }
 
 // activeSession finds the most-recently-active hyprvalet tmux session — the

@@ -981,7 +981,7 @@ func voiceCmd() {
 			return
 		}
 
-		processTurn(text, speaker, confirm)
+		processTurn(ctx, text, speaker, confirm)
 		fmt.Println()
 	}
 }
@@ -1040,15 +1040,58 @@ func bargeEnabled() bool {
 }
 
 // processTurn routes one transcribed utterance through the reasoned, gated
-// flow: question shapes go to the intent path (conversation-capable, cautious
-// about actions), imperatives to the planner. Shared by the windowed session
-// and the always-on wake-word service.
-func processTurn(text string, speaker speech.Speaker, confirm func(string) bool) {
+// flow: a question ABOUT the Claude terminal is answered with the terminal's
+// content folded into the model's context (so it explains, not recites); other
+// questions go to the intent path; imperatives to the planner.
+func processTurn(ctx context.Context, text string, speaker speech.Speaker, confirm func(string) bool) {
+	if aug, ok := terminalContext(ctx, text); ok {
+		ctlAsk([]string{aug}, speaker, confirm, false)
+		return
+	}
 	if isQuestion(text) {
 		ctlAsk([]string{text}, speaker, confirm, true)
 	} else {
 		ctlPlan([]string{text}, true, speaker, confirm)
 	}
+}
+
+// terminalKeywords mark a request as being about the Claude terminal — the only
+// requests for which the terminal's content is captured and sent to the model.
+// Everything else keeps the terminal's contents (which may hold code or
+// secrets) on the machine.
+var terminalKeywords = []string{
+	"terminal", "consola", "claude", "pantalla",
+	"qué dice", "que dice", "está haciendo", "esta haciendo",
+	"preguntó", "pregunto", "muestra", "salida", "output", "escrib",
+}
+
+// terminalContext, when the request is about the terminal and a Claude session
+// is open, returns the request augmented with what the terminal shows — so the
+// model answers from that content — and true. Otherwise it returns false and
+// nothing about the terminal leaves the machine.
+func terminalContext(ctx context.Context, text string) (string, bool) {
+	low := strings.ToLower(text)
+	related := false
+	for _, kw := range terminalKeywords {
+		if strings.Contains(low, kw) {
+			related = true
+			break
+		}
+	}
+	if !related {
+		return "", false
+	}
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	content, err := terminal.Capture(cctx, 30)
+	cancel()
+	if err != nil || strings.TrimSpace(content) == "" {
+		return "", false
+	}
+	aug := fmt.Sprintf(
+		"The Claude Code terminal currently shows the following:\n---\n%s\n---\n"+
+			"Answer the user's question about what is happening there, briefly and in their language. "+
+			"User: %s", content, text)
+	return aug, true
 }
 
 // listenResult is the outcome of one capture-and-transcribe.
