@@ -7,9 +7,11 @@
 #
 # The listener hears the room continuously, transcribes locally ONLY to check
 # for the wake word (default "jarvis"; HYPRVALET_WAKE_WORD configures it, with
-# comma-separated alternates), and discards everything else. Strongly consider
-# the echo-cancelled PipeWire path (see docs) so the assistant does not hear
-# its own voice.
+# comma-separated alternates), and discards everything else. It never hears its
+# own voice: capture and speech are sequential turns, never overlapping.
+#
+# Set HYPRVALET_MIC_TARGET (in the env file) to the input node you want the
+# assistant to listen on — otherwise it follows the system default source.
 
 [Unit]
 Description=hyprvalet — always-on wake-word listener

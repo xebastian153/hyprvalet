@@ -19,11 +19,17 @@ func Start(wavPath string) (stop func() error, err error) {
 	return start("pw-record", defaultSource(), wavPath)
 }
 
-// defaultSource resolves the default input node by name so the recording stream
-// can target it explicitly. On some PipeWire setups an untargeted capture fails
-// with "no target node available" even though a default source exists and works
-// when named. Empty means let pw-record choose.
+// defaultSource resolves which input node the recording stream targets.
+// HYPRVALET_MIC_TARGET pins it explicitly — the echo-cancelled source, for
+// instance, so the assistant hears you without hearing itself, while the rest
+// of the system keeps its own default. Otherwise it falls back to the system
+// default (named explicitly, because on some PipeWire setups an untargeted
+// capture fails with "no target node available"). Empty means let pw-record
+// choose.
 func defaultSource() string {
+	if t := strings.TrimSpace(os.Getenv("HYPRVALET_MIC_TARGET")); t != "" {
+		return t
+	}
 	out, err := exec.Command("pactl", "get-default-source").Output()
 	if err != nil {
 		return ""
