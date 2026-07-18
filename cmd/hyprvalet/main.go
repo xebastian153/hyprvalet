@@ -34,6 +34,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/groq"
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
 	"github.com/xebastian153/hyprvalet/internal/adapters/media"
+	"github.com/xebastian153/hyprvalet/internal/adapters/memory"
 	"github.com/xebastian153/hyprvalet/internal/adapters/mic"
 	"github.com/xebastian153/hyprvalet/internal/adapters/ollama"
 	"github.com/xebastian153/hyprvalet/internal/adapters/omarchy"
@@ -60,6 +61,7 @@ func buildRegistry() *core.Registry {
 	all = append(all, web.Capabilities()...)
 	all = append(all, project.Capabilities()...)
 	all = append(all, terminal.Capabilities()...)
+	all = append(all, memory.Capabilities()...)
 	for _, c := range all {
 		if err := reg.Register(c); err != nil {
 			// A collision in the allowlist is a build-time mistake, not a
@@ -1049,10 +1051,46 @@ func processTurn(ctx context.Context, text string, speaker speech.Speaker, confi
 		return
 	}
 	if isQuestion(text) {
-		ctlAsk([]string{text}, speaker, confirm, true)
+		ctlAsk([]string{withMemory(text)}, speaker, confirm, true)
 	} else {
 		ctlPlan([]string{text}, true, speaker, confirm)
 	}
+}
+
+// withMemory folds what the assistant remembers into a conversational request,
+// so it answers as someone who knows you — your name, your preferences, the
+// projects you are planning — not as a blank slate each turn. This is the
+// assistant's OWN long-term memory (on disk, private to hyprvalet). Notes
+// relevant to the request come first, then the most recent ones fill in; the
+// block is bounded so a growing memory never bloats the prompt. With nothing
+// remembered, the request passes through untouched.
+func withMemory(text string) string {
+	const max = 12
+	seen := map[string]bool{}
+	var notes []string
+	add := func(es []memory.Entry) {
+		for _, e := range es {
+			if len(notes) >= max || seen[e.Text] {
+				continue
+			}
+			seen[e.Text] = true
+			notes = append(notes, e.Text)
+		}
+	}
+	add(memory.Search(text, max))
+	add(memory.Recent(max))
+	if len(notes) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.WriteString("What you remember about the user and their projects " +
+		"(durable facts you saved earlier — use them naturally when relevant, " +
+		"do not recite them):\n")
+	for _, n := range notes {
+		fmt.Fprintf(&b, "- %s\n", n)
+	}
+	fmt.Fprintf(&b, "User: %s", text)
+	return b.String()
 }
 
 // terminalKeywords mark a request as being about the Claude terminal — the only

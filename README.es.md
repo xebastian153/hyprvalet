@@ -161,7 +161,7 @@ sequenceDiagram
     Note over Usuario,C: Tú sigues en el bucle en cada acción.
 ```
 
-## Capabilities (25)
+## Capabilities (28)
 
 | Dominio | Capabilities |
 |---|---|
@@ -169,7 +169,7 @@ sequenceDiagram
 | Aplicaciones y web | `app.open` · `browser.open` · `music.open` · `web.open` · `web.search` |
 | Multimedia y audio | `media.play_pause` · `media.next` · `media.previous` · `volume.set` · `volume.mute` |
 | Escritorio | `theme.next` · `theme.set` · `nightlight.toggle` · `screenshot.take` · `system.lock` · `omarchy.run` |
-| Asistente | `reminder.set` — recordatorios hablados proactivos |
+| Asistente | `reminder.set` — recordatorios hablados proactivos · `memory.remember` · `memory.recall` · `memory.forget` |
 | Puente con Claude Code | `project.new` · `project.open` · `terminal.read` · `terminal.send` |
 
 Agregar una es simple: implementa la interfaz `core.Capability` en un adaptador y

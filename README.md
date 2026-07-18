@@ -160,7 +160,7 @@ sequenceDiagram
     Note over You,C: You stay in the loop for every action.
 ```
 
-## Capabilities (25)
+## Capabilities (28)
 
 | Domain | Capabilities |
 |---|---|
@@ -168,7 +168,7 @@ sequenceDiagram
 | Apps & web | `app.open` · `browser.open` · `music.open` · `web.open` · `web.search` |
 | Media & audio | `media.play_pause` · `media.next` · `media.previous` · `volume.set` · `volume.mute` |
 | Desktop | `theme.next` · `theme.set` · `nightlight.toggle` · `screenshot.take` · `system.lock` · `omarchy.run` |
-| Assistant | `reminder.set` — proactive spoken reminders |
+| Assistant | `reminder.set` — proactive spoken reminders · `memory.remember` · `memory.recall` · `memory.forget` |
 | Claude Code bridge | `project.new` · `project.open` · `terminal.read` · `terminal.send` |
 
 Adding one is small: implement `core.Capability` in an adapter and register it.
