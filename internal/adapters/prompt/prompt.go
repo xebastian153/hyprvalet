@@ -146,6 +146,7 @@ func recentActions(recent []core.Event, now time.Time) string {
 		fmt.Fprintf(&b, "%d. %s ago: %s %s %s\n", len(recent)-i, age, e.Kind, e.Cap, strings.Join(args, " "))
 	}
 	b.WriteString("When the request refers to a past action, resolve it against this history. ")
+	b.WriteString("History is context for resolving references — NEVER a suggestion to repeat an action the user did not ask for. ")
 	b.WriteString("Every argument value must be a literal value copied from the history or the request ")
 	b.WriteString("(a number like 3, a name like firefox) — never a description of one.\n")
 	return b.String()

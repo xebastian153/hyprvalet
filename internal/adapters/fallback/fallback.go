@@ -7,6 +7,7 @@ package fallback
 import (
 	"context"
 	"fmt"
+	"os"
 
 	"github.com/xebastian153/hyprvalet/internal/core"
 )
@@ -34,6 +35,7 @@ func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capa
 	if err == nil {
 		return intent, nil
 	}
+	note(err)
 	intent, berr := c.backup.Interpret(ctx, request, caps, recent)
 	if berr != nil {
 		return core.Intent{}, fmt.Errorf("primary failed (%v); backup failed too: %w", err, berr)
@@ -47,9 +49,18 @@ func (c *Client) Plan(ctx context.Context, request string, caps []core.Capabilit
 	if err == nil {
 		return plan, nil
 	}
+	note(err)
 	plan, berr := c.backup.Plan(ctx, request, caps, recent)
 	if berr != nil {
 		return core.Plan{}, fmt.Errorf("primary failed (%v); backup failed too: %w", err, berr)
 	}
 	return plan, nil
+}
+
+// note makes degradation VISIBLE: a silent fallback once turned a knowledge
+// question into a screen lock, and nobody could tell which model had answered.
+// Written to stderr so the daemon's journal and an interactive shell both see
+// it without threading a logger through the port.
+func note(err error) {
+	fmt.Fprintf(os.Stderr, "reasoning: primary provider failed (%v) — answering with the local fallback\n", err)
 }

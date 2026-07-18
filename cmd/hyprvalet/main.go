@@ -848,6 +848,30 @@ func isAffirmative(text string) bool {
 	return false
 }
 
+// questionWords open interrogative sentences in the user's languages. Used by
+// the deterministic router below — not for understanding, only for routing.
+var questionWords = map[string]bool{
+	"qué": true, "que": true, "quién": true, "quien": true, "cuál": true, "cual": true,
+	"cuándo": true, "cuando": true, "dónde": true, "donde": true, "cómo": true,
+	"por": true, "para": true,
+	"what": true, "who": true, "which": true, "when": true, "where": true,
+	"why": true, "how": true,
+}
+
+// isQuestion routes by sentence shape: interrogatives go to the intent layer
+// (conversation-capable, single actions still possible), imperatives go to the
+// planner (multi-step capable). This is deterministic on purpose — the planner
+// once invented a plan for a physics question and LOCKED THE SCREEN; routing
+// must not depend on a model resisting temptation.
+func isQuestion(text string) bool {
+	t := strings.TrimSpace(text)
+	if strings.HasPrefix(t, "¿") || strings.HasSuffix(t, "?") {
+		return true
+	}
+	fields := strings.Fields(strings.ToLower(t))
+	return len(fields) > 0 && questionWords[strings.Trim(fields[0], ".,!?¡¿")]
+}
+
 // planNeedsConfirmation reports whether any step still requires a human: a
 // plan of purely policy-allowed steps is pre-authorized.
 func planNeedsConfirmation(steps []protocol.PlanStep) bool {
@@ -892,7 +916,11 @@ func voiceCmd() {
 			return
 		}
 
-		ctlPlan([]string{text}, true, speaker, confirm)
+		if isQuestion(text) {
+			ctlAsk([]string{text}, speaker, confirm, true)
+		} else {
+			ctlPlan([]string{text}, true, speaker, confirm)
+		}
 		fmt.Println()
 	}
 }
@@ -1008,7 +1036,9 @@ func ctlCmd(args []string) {
 		}
 		ctlRun(args[1], args[2:])
 	case "ask":
-		ctlAsk(args[1:])
+		if !ctlAsk(args[1:], nil, promptYes, false) {
+			os.Exit(1)
+		}
 	case "plan":
 		if !ctlPlan(args[1:], false, nil, promptYes) {
 			os.Exit(1)
@@ -1102,8 +1132,13 @@ func say(speaker speech.Speaker, text string) {
 // it, then runs it through the daemon's two-phase confirm flow — the reasoning
 // lives in the resident process; the human prompt stays here in the client.
 // When the daemon reports a retryable failure (the capability rejected the
-// model's arguments), it re-asks once with the error as feedback.
-func ctlAsk(rest []string) {
+// model's arguments), it re-asks once with the error as feedback. A non-nil
+// speaker voices replies and outcomes (the voice session passes one); failure
+// is reported, not exited, so a voice session survives it. cautious confirms
+// ANY action before running it, even policy-allowed ones — the voice session
+// sets it for question-shaped requests, where an action is unusual enough that
+// running one unannounced once locked the user's screen.
+func ctlAsk(rest []string, speaker speech.Speaker, confirm func(string) bool, cautious bool) bool {
 	request := strings.TrimSpace(strings.Join(rest, " "))
 	if request == "" {
 		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl ask \"<what you want>\"")
@@ -1118,22 +1153,26 @@ func ctlAsk(rest []string) {
 		resp, err := daemon.AskViaDaemon(daemon.SocketPath(), attempt, escalated(i))
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
+			say(speaker, phrase("stopped"))
+			return false
 		}
 		if resp.Status == protocol.StatusError {
 			fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
-			os.Exit(1)
+			say(speaker, phrase("stopped"))
+			return false
 		}
 		if len(resp.Plan) == 0 {
 			if resp.Reply != "" {
 				fmt.Println(resp.Reply)
-				return
+				say(speaker, resp.Reply)
+				return true
 			}
 			fmt.Println("no match — the model found nothing it could do for that request")
 			if resp.Reasoning != "" {
 				fmt.Printf("  reasoning: %s\n", resp.Reasoning)
 			}
-			return
+			say(speaker, phrase("nothing"))
+			return true
 		}
 
 		step := resp.Plan[0]
@@ -1141,21 +1180,40 @@ func ctlAsk(rest []string) {
 		if resp.Reasoning != "" {
 			fmt.Printf("  reasoning: %s\n", resp.Reasoning)
 		}
+		if cautious && !confirm(fmt.Sprintf("run %s?", step.Cap)) {
+			fmt.Println("aborted")
+			return true
+		}
 
 		run, err := daemon.RunViaDaemon(daemon.SocketPath(), step.Cap, step.Args, func(reason string) bool {
-			return promptYes(reason + " — proceed?")
+			return confirm(reason + " — proceed?")
 		})
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "%v\n", err)
-			os.Exit(1)
+			say(speaker, phrase("stopped"))
+			return false
 		}
 		if run.Status == protocol.StatusError && run.Retryable && i < maxInterpretAttempts {
 			fmt.Fprintf(os.Stderr, "arguments rejected: %s — asking the model to correct\n", run.Error)
 			attempt = correctiveRequest(request, fmt.Errorf("%s", run.Error))
 			continue
 		}
-		reportRun(run)
-		return
+		switch run.Status {
+		case protocol.StatusRan:
+			if run.Text != "" {
+				fmt.Println(run.Text)
+			}
+			say(speaker, phrase("done"))
+			return true
+		case protocol.StatusDenied:
+			fmt.Fprintf(os.Stderr, "denied: %s\n", run.Text)
+			say(speaker, phrase("denied"))
+			return false
+		default:
+			fmt.Fprintf(os.Stderr, "error: %s\n", run.Error)
+			say(speaker, phrase("stopped"))
+			return false
+		}
 	}
 }
 
