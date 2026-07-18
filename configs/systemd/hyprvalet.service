@@ -19,6 +19,11 @@ RestartSec=2
 # Pick the local model the daemon reasons with (default: qwen2.5:7b).
 # Environment=HYPRVALET_MODEL=qwen2.5:3b
 # Environment=HYPRVALET_OLLAMA_URL=http://localhost:11434
+# Language of spoken output (plan summaries, fixed phrases): English (default) or Spanish.
+# Environment=HYPRVALET_LANG=Spanish
+# Secrets (e.g. GROQ_API_KEY for cloud reasoning with local fallback) live in a
+# 0600 file, never in this unit:
+EnvironmentFile=-%h/.config/hyprvalet/env
 
 [Install]
 WantedBy=default.target

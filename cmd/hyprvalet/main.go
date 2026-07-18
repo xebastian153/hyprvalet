@@ -24,6 +24,8 @@ import (
 
 	"github.com/xebastian153/hyprvalet/internal/adapters/audio"
 	"github.com/xebastian153/hyprvalet/internal/adapters/eventlog"
+	"github.com/xebastian153/hyprvalet/internal/adapters/fallback"
+	"github.com/xebastian153/hyprvalet/internal/adapters/groq"
 	"github.com/xebastian153/hyprvalet/internal/adapters/hypr"
 	"github.com/xebastian153/hyprvalet/internal/adapters/media"
 	"github.com/xebastian153/hyprvalet/internal/adapters/mic"
@@ -58,6 +60,28 @@ func buildRegistry() *core.Registry {
 // events is the process-wide audit log. Auditing is an observer, never a gate:
 // a failed append warns and the action's outcome stands.
 var events = eventlog.New(eventlog.Path())
+
+// defaultReasoner picks the reasoning provider: Groq (cloud — larger models at
+// interactive speed) when GROQ_API_KEY is set, composed with local Ollama as an
+// automatic fallback so losing the network never silences the agent; local
+// Ollama alone otherwise. The privacy trade is explicit: with Groq, requests
+// and their episodic-memory context leave the machine.
+func defaultReasoner() fallback.Reasoner {
+	local := ollama.Default()
+	if groq.Available() {
+		return fallback.New(groq.Default(), local)
+	}
+	return local
+}
+
+// strongReasoner picks the escalation tier for the corrective loop, with the
+// same cloud-with-local-fallback composition.
+func strongReasoner() core.LLMPort {
+	if groq.Available() {
+		return fallback.New(groq.Strong(), ollama.Strong())
+	}
+	return ollama.Strong()
+}
 
 // emitEvent records what became of one attempted capability call.
 func emitEvent(kind core.EventKind, cap string, args core.Args, detail string) {
@@ -579,10 +603,10 @@ func askCmd(reg *core.Registry, rules core.PolicyRules, rest []string) {
 		// The model may choose from every capability; the allowlist and the
 		// gate, not the prompt, are what keep a wrong choice safe. The final
 		// attempt escalates to the stronger model.
-		llm := ollama.Default()
+		var llm core.LLMPort = defaultReasoner()
 		if escalated(i) {
 			fmt.Fprintln(os.Stderr, "escalating to the stronger model")
-			llm = ollama.Strong()
+			llm = strongReasoner()
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 		intent, err := llm.Interpret(ctx, attempt, reg.List(), recentEvents())
@@ -660,7 +684,7 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
-	plan, err := ollama.Default().Plan(ctx, request, reg.List(), recentEvents())
+	plan, err := defaultReasoner().Plan(ctx, request, reg.List(), recentEvents())
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "planning failed: %v\n", err)
@@ -672,7 +696,7 @@ func planCmd(reg *core.Registry, rules core.PolicyRules, rest []string, execute 
 		// The planner plans; conversation is the intent layer's job. Fall back
 		// to it so a chat request still gets an answer.
 		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
-		intent, ierr := ollama.Default().Interpret(ctx, request, reg.List(), recentEvents())
+		intent, ierr := defaultReasoner().Interpret(ctx, request, reg.List(), recentEvents())
 		cancel()
 		if ierr == nil && intent.Capability == "" && intent.Reply != "" {
 			fmt.Println(intent.Reply)
@@ -767,10 +791,11 @@ func daemonCmd(reg *core.Registry, rules core.PolicyRules) {
 		ln.Close()
 	}()
 
-	// One Ollama client serves both reasoning ports (LLMPort + PlannerPort);
-	// a second, stronger client is the escalation tier for corrective retries.
-	llm := ollama.Default()
-	d := daemon.New(reg, rules, llm, llm, ollama.Strong(), events, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
+	// One reasoner serves both ports (LLMPort + PlannerPort); a second, stronger
+	// one is the escalation tier. Provider selection (Groq with local fallback,
+	// or local alone) happens once, here at the edge.
+	r := defaultReasoner()
+	d := daemon.New(reg, rules, r, r, strongReasoner(), events, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
 	if err := d.Run(ctx, ln); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
 		os.Exit(1)

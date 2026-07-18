@@ -93,26 +93,6 @@ func TestInterpretBadContent(t *testing.T) {
 	}
 }
 
-func TestPromptsListCapabilities(t *testing.T) {
-	caps := []core.Capability{promptCap{}}
-	for _, tt := range []struct {
-		name   string
-		prompt string
-	}{
-		{"intent prompt", buildIntentPrompt(caps, nil)},
-		{"plan prompt", buildPlanPrompt(caps, nil)},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if !strings.Contains(tt.prompt, "demo.thing") {
-				t.Error("prompt should list the capability id")
-			}
-			if !strings.Contains(tt.prompt, "widget") {
-				t.Error("prompt should list the capability params")
-			}
-		})
-	}
-}
-
 func TestPlanParsesSteps(t *testing.T) {
 	var got chatRequest
 	content := `{"summary":"set up work","steps":[` +
@@ -217,13 +197,3 @@ func TestPromptCarriesRecentActions(t *testing.T) {
 		t.Fatal("empty memory must not add a recent-actions section")
 	}
 }
-
-// promptCap is a minimal capability for prompt-building assertions.
-type promptCap struct{}
-
-func (promptCap) ID() string                                     { return "demo.thing" }
-func (promptCap) Description() string                            { return "Do a demo thing" }
-func (promptCap) Access() core.AccessKind                        { return core.AccessCommand }
-func (promptCap) Risk() core.Risk                                { return core.RiskSafe }
-func (promptCap) Params() []string                               { return []string{"widget"} }
-func (promptCap) Run(context.Context, core.Args) (string, error) { return "", nil }

@@ -1,7 +1,8 @@
 // Package ollama implements the core reasoning ports (LLMPort and PlannerPort)
 // against a local Ollama server. It is an adapter at the edge of the hexagon:
-// the core knows only the interfaces, never this HTTP client, the prompt, or the
-// model.
+// the core knows only the interfaces, never this HTTP client or the model. The
+// prompts and parsers it speaks live in the shared prompt package — Ollama is
+// one transport for that contract, Groq is another.
 //
 // The model never emits shell. It returns a structured object — one capability
 // (LLMPort) or an ordered list of capability steps (PlannerPort) — which the
@@ -17,10 +18,10 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
+	"github.com/xebastian153/hyprvalet/internal/adapters/prompt"
 	"github.com/xebastian153/hyprvalet/internal/core"
 )
 
@@ -68,46 +69,6 @@ func envOr(key, fallback string) string {
 	}
 	return fallback
 }
-
-// spokenLanguage is the language for text that will be spoken aloud (plan
-// summaries). It should match the installed TTS voice — HYPRVALET_LANG and
-// HYPRVALET_VOICE are two halves of one choice.
-func spokenLanguage() string {
-	return envOr("HYPRVALET_LANG", "English")
-}
-
-// intentSchema constrains a single-capability reply to a typed intent.
-var intentSchema = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "capability": {"type": "string"},
-    "args": {"type": "object", "additionalProperties": {"type": "string"}},
-    "reply": {"type": "string"},
-    "reasoning": {"type": "string"}
-  },
-  "required": ["capability", "reply"]
-}`)
-
-// planSchema constrains a multi-step reply to an ordered list of typed steps.
-var planSchema = json.RawMessage(`{
-  "type": "object",
-  "properties": {
-    "summary": {"type": "string"},
-    "reply": {"type": "string"},
-    "steps": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "properties": {
-          "capability": {"type": "string"},
-          "args": {"type": "object", "additionalProperties": {"type": "string"}}
-        },
-        "required": ["capability"]
-      }
-    }
-  },
-  "required": ["steps"]
-}`)
 
 type chatMessage struct {
 	Role    string `json:"role"`
@@ -172,136 +133,19 @@ func (c *Client) chat(ctx context.Context, system, user string, format json.RawM
 
 // Interpret maps a request to one capability. It satisfies core.LLMPort.
 func (c *Client) Interpret(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Intent, error) {
-	content, err := c.chat(ctx, buildIntentPrompt(caps, recent), request, intentSchema)
+	content, err := c.chat(ctx, prompt.BuildIntent(caps, recent), request, prompt.IntentSchema)
 	if err != nil {
 		return core.Intent{}, err
 	}
-	var parsed struct {
-		Capability string            `json:"capability"`
-		Args       map[string]string `json:"args"`
-		Reply      string            `json:"reply"`
-		Reasoning  string            `json:"reasoning"`
-	}
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		return core.Intent{}, fmt.Errorf("model did not return valid intent JSON: %w (got %q)", err, content)
-	}
-	return core.Intent{
-		Capability: strings.TrimSpace(parsed.Capability),
-		Args:       core.Args(parsed.Args),
-		Reply:      strings.TrimSpace(parsed.Reply),
-		Reasoning:  parsed.Reasoning,
-	}, nil
+	return prompt.ParseIntent(content)
 }
 
 // Plan maps a request to an ordered plan of capability steps. It satisfies
 // core.PlannerPort. A request the model cannot fulfill returns an empty plan.
 func (c *Client) Plan(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Plan, error) {
-	content, err := c.chat(ctx, buildPlanPrompt(caps, recent), request, planSchema)
+	content, err := c.chat(ctx, prompt.BuildPlan(caps, recent), request, prompt.PlanSchema)
 	if err != nil {
 		return core.Plan{}, err
 	}
-	var parsed struct {
-		Summary string `json:"summary"`
-		Reply   string `json:"reply"`
-		Steps   []struct {
-			Capability string            `json:"capability"`
-			Args       map[string]string `json:"args"`
-		} `json:"steps"`
-	}
-	if err := json.Unmarshal([]byte(content), &parsed); err != nil {
-		return core.Plan{}, fmt.Errorf("model did not return valid plan JSON: %w (got %q)", err, content)
-	}
-	steps := make([]core.Step, 0, len(parsed.Steps))
-	for _, s := range parsed.Steps {
-		steps = append(steps, core.Step{
-			Capability: strings.TrimSpace(s.Capability),
-			Args:       core.Args(s.Args),
-		})
-	}
-	return core.Plan{Request: request, Summary: parsed.Summary, Reply: strings.TrimSpace(parsed.Reply), Steps: steps}, nil
-}
-
-// capabilityList renders the menu the model may choose from: nothing outside it
-// is reachable, and the core rejects anything the model invents anyway.
-func capabilityList(caps []core.Capability) string {
-	var b strings.Builder
-	b.WriteString("Capabilities:\n")
-	for _, c := range caps {
-		params := strings.Join(c.Params(), ", ")
-		if params == "" {
-			params = "(none)"
-		}
-		fmt.Fprintf(&b, "- %s: %s [params: %s]\n", c.ID(), c.Description(), params)
-	}
-	return b.String()
-}
-
-// recentActions renders the agent's episodic memory for the system prompt: what
-// ran or was refused lately, oldest first, so the model can resolve references
-// like "again" or "back" against concrete actions instead of guessing. Empty
-// memory renders nothing — the prompt only grows when there is a past to tell.
-func recentActions(recent []core.Event, now time.Time) string {
-	if len(recent) == 0 {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("\nYour recent actions and conversation, most recent first:\n")
-	for i := len(recent) - 1; i >= 0; i-- {
-		e := recent[i]
-		age := now.Sub(e.At).Round(time.Second)
-		if e.Kind == core.EventReplied {
-			// Dialogue carries its text — that is what makes it context.
-			fmt.Fprintf(&b, "%d. %s ago: %s %s\n", len(recent)-i, age, e.Kind, e.Detail)
-			continue
-		}
-		args := make([]string, 0, len(e.Args))
-		for k, v := range e.Args {
-			args = append(args, fmt.Sprintf("%s=%s", k, v))
-		}
-		sort.Strings(args)
-		fmt.Fprintf(&b, "%d. %s ago: %s %s %s\n", len(recent)-i, age, e.Kind, e.Cap, strings.Join(args, " "))
-	}
-	b.WriteString("When the request refers to a past action, resolve it against this history. ")
-	b.WriteString("Every argument value must be a literal value copied from the history or the request ")
-	b.WriteString("(a number like 3, a name like firefox) — never a description of one.\n")
-	return b.String()
-}
-
-// conversationRule teaches the model the third outcome: talk. A reply is words
-// only — the caller speaks it and executes nothing — so the rule insists an
-// action is preferred whenever one fits, and honesty over invention otherwise.
-// The field contract is spelled out structurally: small models otherwise put
-// the word "reply" into the capability field.
-const conversationRule = "You always fill exactly one of two fields, never both:\n" +
-	"- an action: the capability field holds an id copied from the list (and reply stays \"\").\n" +
-	"- an answer: the reply field holds one short sentence in the user's language, spoken aloud to the user (and capability stays \"\").\n" +
-	"Use an answer when the user greets, thanks, or asks you something instead of requesting an action. " +
-	"Answer only from what you see here (your capabilities, the recent history); if you do not know something, say so. " +
-	"Whenever an action fits the request, always prefer the action.\n"
-
-func buildIntentPrompt(caps []core.Capability, recent []core.Event) string {
-	var b strings.Builder
-	b.WriteString("You are hyprvalet, a voice assistant controlling this Linux desktop.\n")
-	b.WriteString("You translate a user's desktop request into exactly one capability from the list below.\n")
-	b.WriteString("Choose the single capability whose action best matches the request and fill its arguments.\n")
-	b.WriteString("If no capability matches, return an empty string for \"capability\".\n")
-	b.WriteString("Never invent a capability id or an argument name that is not listed. Argument values are strings.\n")
-	b.WriteString(conversationRule)
-	b.WriteString("\n")
-	b.WriteString(capabilityList(caps))
-	b.WriteString(recentActions(recent, time.Now()))
-	return b.String()
-}
-
-func buildPlanPrompt(caps []core.Capability, recent []core.Event) string {
-	var b strings.Builder
-	b.WriteString("You are hyprvalet, a voice assistant controlling this Linux desktop.\n")
-	b.WriteString("You turn a user's desktop request into an ordered plan of one or more capability calls from the list below.\n")
-	b.WriteString("Use as many steps as the request needs, in the order they should run, and fill each step's arguments.\n")
-	b.WriteString("Use only capability ids and argument names from the list. If the request cannot be done with these capabilities, return an empty steps array.\n")
-	fmt.Fprintf(&b, "Also give a one-line summary of the plan, in %s — it is spoken aloud to the user. ", spokenLanguage())
-	b.WriteString("Each argument value is a plain string with no surrounding braces or quotes — a workspace is 3, not {3} or \"3\".\n\n")
-	b.WriteString(capabilityList(caps))
-	b.WriteString(recentActions(recent, time.Now()))
-	return b.String()
+	return prompt.ParsePlan(content, request)
 }
