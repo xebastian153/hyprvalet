@@ -940,6 +940,14 @@ func voiceCmd() {
 	// The command spoken with the wake word arrives via HYPRVALET_FIRST.
 	pending = strings.TrimSpace(os.Getenv("HYPRVALET_FIRST"))
 
+	// Voice-mode greeting: addressed by name alone (nothing to do yet), the
+	// assistant announces it is listening — like opening a phone's voice mode —
+	// instead of waiting in silence. When a command came with the wake word,
+	// it gets on with it rather than greeting.
+	if pending == "" {
+		say(plain, phrase("greeting"))
+	}
+
 	for {
 		var text string
 		if pending != "" {
@@ -1330,6 +1338,7 @@ var spokenPhrases = map[string]map[string]string{
 		"bye":       "Goodbye.",
 		"confirm":   "Shall I proceed?",
 		"attending": "Sir?",
+		"greeting":  "How may I help you, sir?",
 	},
 	"Spanish": {
 		"done":      "Listo.",
@@ -1339,6 +1348,7 @@ var spokenPhrases = map[string]map[string]string{
 		"bye":       "Hasta luego.",
 		"confirm":   "¿Procedo?",
 		"attending": "¿Señor?",
+		"greeting":  "¿En qué puedo ayudarle, señor?",
 	},
 }
 
