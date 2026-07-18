@@ -85,6 +85,8 @@ func main() {
 		daemonCmd(reg, rules)
 	case "ping":
 		pingCmd()
+	case "ctl":
+		ctlCmd(args[1:])
 	case "run":
 		requireArg(args, "run", "<capability> [key=value ...]")
 		runCap(reg, rules, args[1], args[2:])
@@ -119,6 +121,7 @@ func usage() {
 	fmt.Println("  hyprvalet do \"<request>\"             plan, confirm once, then execute step by step")
 	fmt.Println("  hyprvalet daemon                     run the long-lived daemon (Unix socket)")
 	fmt.Println("  hyprvalet ping                       check the daemon is alive")
+	fmt.Println("  hyprvalet ctl run <cap> [k=v ...]    run a capability via the daemon (confirms if needed)")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -660,6 +663,57 @@ func pingCmd() {
 		os.Exit(1)
 	}
 	fmt.Printf("daemon alive — %d capabilities\n", resp.Count)
+}
+
+func ctlCmd(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl <ping|run> ...")
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "ping":
+		pingCmd()
+	case "run":
+		if len(args) < 2 {
+			fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl run <capability> [key=value ...]")
+			os.Exit(2)
+		}
+		ctlRun(args[1], args[2:])
+	default:
+		fmt.Fprintf(os.Stderr, "unknown ctl op %q (want ping|run)\n", args[0])
+		os.Exit(2)
+	}
+}
+
+// ctlRun runs a capability through the daemon, prompting the human here (in the
+// client) if the daemon reports the action needs confirmation.
+func ctlRun(id string, rest []string) {
+	args, err := parseArgs(rest)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
+	}
+	resp, err := daemon.RunViaDaemon(daemon.SocketPath(), id, args, func(reason string) bool {
+		return promptYes(reason + " — proceed?")
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	switch resp.Status {
+	case protocol.StatusRan:
+		if resp.Text != "" {
+			fmt.Println(resp.Text)
+		}
+	case protocol.StatusDenied:
+		fmt.Fprintf(os.Stderr, "denied: %s\n", resp.Text)
+		os.Exit(1)
+	case protocol.StatusError:
+		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
+		os.Exit(1)
+	default:
+		fmt.Printf("%s: %s\n", resp.Status, resp.Text)
+	}
 }
 
 func parseArgs(rest []string) (core.Args, error) {
