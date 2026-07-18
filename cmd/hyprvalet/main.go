@@ -808,40 +808,74 @@ func daemonCmd(reg *core.Registry, rules core.PolicyRules) {
 	}
 }
 
-// voiceCmd is the voice frontend: record until Enter, transcribe locally, then
-// hand the text to the exact flow a typed `ctl do` uses — daemon reasoning,
-// plan preview, one confirmation, gated execution. Voice is only an input
-// method; it earns no shortcut through the permission model.
+// farewells are the spoken ways to end a voice session — saying goodbye is the
+// natural exit for a conversation. Matched against the normalized transcript.
+var farewells = map[string]bool{
+	"chau": true, "chao": true, "adios": true, "adiós": true, "hasta luego": true,
+	"nos vemos": true, "goodbye": true, "bye": true, "exit": true, "quit": true,
+}
+
+// voiceCmd is the voice frontend: a conversational SESSION, not a one-shot.
+// Each turn records until Enter, transcribes locally, and hands the text to
+// the exact flow a typed `ctl do` uses — daemon reasoning, plan preview, one
+// confirmation, gated execution — then listens again. The session ends when
+// the user says goodbye, types q, or closes the stream (Ctrl+D). Voice is only
+// an input method; it earns no shortcut through the permission model, and a
+// failed request ends the turn, never the session.
 func voiceCmd() {
 	wav := filepath.Join(os.TempDir(), fmt.Sprintf("hyprvalet-voice-%d.wav", os.Getpid()))
 	defer os.Remove(wav)
 
-	stop, err := mic.Start(wav)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("listening — speak your request, then press Enter")
-	_, _ = bufio.NewReader(os.Stdin).ReadString('\n')
-	if err := stop(); err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
+	speaker := speakerChain()
+	stdin := bufio.NewReader(os.Stdin)
+	fmt.Println("voice session — speak, then press Enter. Say goodbye (or type q) to leave.")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	text, err := whisper.Default().Transcribe(ctx, wav)
-	cancel()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
-	}
-	if text == "" {
-		fmt.Println("heard nothing — try again closer to the microphone")
-		return
-	}
-	fmt.Printf("heard: %s\n", text)
+	for {
+		stop, err := mic.Start(wav)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Println("listening…")
+		line, readErr := stdin.ReadString('\n')
+		if err := stop(); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		if readErr != nil || strings.TrimSpace(line) == "q" {
+			// Stream closed or an explicit quit: leave without transcribing.
+			say(speaker, phrase("bye"))
+			return
+		}
 
-	ctlPlan([]string{text}, true, speakerChain())
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		text, err := whisper.Default().Transcribe(ctx, wav)
+		cancel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			continue // a failed transcription ends the turn, not the session
+		}
+		if text == "" {
+			fmt.Println("heard nothing — try again closer to the microphone")
+			continue
+		}
+		fmt.Printf("heard: %s\n", text)
+
+		if farewells[normalizeUtterance(text)] {
+			say(speaker, phrase("bye"))
+			return
+		}
+
+		ctlPlan([]string{text}, true, speaker)
+		fmt.Println()
+	}
+}
+
+// normalizeUtterance lowers and strips punctuation/accents-adjacent noise so a
+// transcribed "¡Chau!" matches the farewell "chau".
+func normalizeUtterance(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	return strings.Trim(s, ".,!?¡¿ ")
 }
 
 // logCmd shows the audit trail: the most recent attempted actions and what
@@ -903,9 +937,13 @@ func ctlCmd(args []string) {
 	case "ask":
 		ctlAsk(args[1:])
 	case "plan":
-		ctlPlan(args[1:], false, nil)
+		if !ctlPlan(args[1:], false, nil) {
+			os.Exit(1)
+		}
 	case "do":
-		ctlPlan(args[1:], true, nil)
+		if !ctlPlan(args[1:], true, nil) {
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "unknown ctl op %q (want ping|run|ask|plan|do)\n", args[0])
 		os.Exit(2)
@@ -950,12 +988,14 @@ var spokenPhrases = map[string]map[string]string{
 		"stopped": "I had to stop.",
 		"denied":  "That is not permitted.",
 		"nothing": "I found nothing I can do for that.",
+		"bye":     "Goodbye.",
 	},
 	"Spanish": {
 		"done":    "Listo.",
 		"stopped": "Tuve que detenerme.",
 		"denied":  "Eso no está permitido.",
 		"nothing": "No encontré nada que pueda hacer con eso.",
+		"bye":     "Hasta luego.",
 	},
 }
 
@@ -1050,7 +1090,9 @@ func ctlAsk(rest []string) {
 // whole plan once, then runs each step through the daemon — reusing the per-step
 // confirm flow, with the daemon re-checking each step for TOCTOU. A non-nil
 // speaker voices the summary and the outcome (the voice frontend passes one).
-func ctlPlan(rest []string, execute bool, speaker speech.Speaker) {
+// It reports failure instead of exiting so a voice SESSION survives a failed
+// request; the one-shot ctl wrapper turns false into an exit code.
+func ctlPlan(rest []string, execute bool, speaker speech.Speaker) bool {
 	request := strings.TrimSpace(strings.Join(rest, " "))
 	if request == "" {
 		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl plan|do \"<what you want>\"")
@@ -1059,11 +1101,13 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker) {
 	resp, err := daemon.PlanViaDaemon(daemon.SocketPath(), request)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
+		say(speaker, phrase("stopped"))
+		return false
 	}
 	if resp.Status == protocol.StatusError {
 		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
-		os.Exit(1)
+		say(speaker, phrase("stopped"))
+		return false
 	}
 	if len(resp.Plan) == 0 {
 		// Conversation, not action: show and speak the answer. Words execute
@@ -1071,11 +1115,11 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker) {
 		if resp.Reply != "" {
 			fmt.Println(resp.Reply)
 			say(speaker, resp.Reply)
-			return
+			return true
 		}
 		fmt.Println("no plan — the model found nothing it could do for that request")
 		say(speaker, phrase("nothing"))
-		return
+		return true
 	}
 
 	if resp.Summary != "" {
@@ -1096,15 +1140,15 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker) {
 			fmt.Fprintf(os.Stderr, "  - %s\n", b)
 		}
 		say(speaker, phrase("denied"))
-		os.Exit(1)
+		return false
 	}
 
 	if !execute {
-		return // `ctl plan` previews only
+		return true // `ctl plan` previews only
 	}
 	if !promptYes(fmt.Sprintf("execute this %d-step plan?", len(resp.Plan))) {
 		fmt.Println("aborted")
-		return
+		return true
 	}
 
 	n := len(resp.Plan)
@@ -1115,7 +1159,8 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker) {
 		run, err := daemon.RunStep(daemon.SocketPath(), s.Cap, s.Args)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %v\n", i+1, n, s.Cap, err)
-			os.Exit(1)
+			say(speaker, phrase("stopped"))
+			return false
 		}
 		switch run.Status {
 		case protocol.StatusRan:
@@ -1123,21 +1168,22 @@ func ctlPlan(rest []string, execute bool, speaker speech.Speaker) {
 		case protocol.StatusDenied:
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): no longer permitted (state changed since preview)\n", i+1, n, s.Cap)
 			say(speaker, phrase("stopped"))
-			os.Exit(1)
+			return false
 		case protocol.StatusNeedsConfirm:
 			// The plan was approved as a whole, yet the daemon now wants a
 			// confirmation: a doom-loop tripped mid-plan. Stop rather than hammer.
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Text)
 			say(speaker, phrase("stopped"))
-			os.Exit(1)
+			return false
 		default:
 			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Error)
 			say(speaker, phrase("stopped"))
-			os.Exit(1)
+			return false
 		}
 	}
 	fmt.Println("plan done")
 	say(speaker, phrase("done"))
+	return true
 }
 
 // reportRun prints the outcome of a single daemon run and exits nonzero on a
