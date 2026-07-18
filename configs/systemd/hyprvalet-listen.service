@@ -1,0 +1,27 @@
+# hyprvalet always-on wake-word listener — systemd user service (example)
+#
+# Install:
+#   cp configs/systemd/hyprvalet-listen.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hyprvalet-listen
+#
+# The listener hears the room continuously, transcribes locally ONLY to check
+# for the wake word (default "jarvis"; HYPRVALET_WAKE_WORD configures it, with
+# comma-separated alternates), and discards everything else. Strongly consider
+# the echo-cancelled PipeWire path (see docs) so the assistant does not hear
+# its own voice.
+
+[Unit]
+Description=hyprvalet — always-on wake-word listener
+After=hyprvalet.service pipewire.service
+Wants=hyprvalet.service
+
+[Service]
+ExecStart=%h/.local/bin/hyprvalet listen
+Restart=on-failure
+RestartSec=2
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+EnvironmentFile=-%h/.config/hyprvalet/env
+
+[Install]
+WantedBy=default.target

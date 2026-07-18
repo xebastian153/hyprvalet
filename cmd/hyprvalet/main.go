@@ -146,6 +146,8 @@ func main() {
 		planCmd(reg, rules, args[1:], true)
 	case "voice":
 		voiceCmd()
+	case "listen":
+		listenCmd()
 	case "say":
 		sayCmd(args[1:])
 	case "daemon":
@@ -902,7 +904,7 @@ func voiceCmd() {
 	fmt.Println("voice session — hands-free: just speak; a pause ends your turn. Say goodbye to leave.")
 
 	for {
-		text, ok := listenAndTranscribe(ctx, wav)
+		text, ok := listenAndTranscribe(ctx, wav, false)
 		if ctx.Err() != nil {
 			return // Ctrl+C or the window closing: leave quietly
 		}
@@ -916,21 +918,33 @@ func voiceCmd() {
 			return
 		}
 
-		if isQuestion(text) {
-			ctlAsk([]string{text}, speaker, confirm, true)
-		} else {
-			ctlPlan([]string{text}, true, speaker, confirm)
-		}
+		processTurn(text, speaker, confirm)
 		fmt.Println()
+	}
+}
+
+// processTurn routes one transcribed utterance through the reasoned, gated
+// flow: question shapes go to the intent path (conversation-capable, cautious
+// about actions), imperatives to the planner. Shared by the windowed session
+// and the always-on wake-word service.
+func processTurn(text string, speaker speech.Speaker, confirm func(string) bool) {
+	if isQuestion(text) {
+		ctlAsk([]string{text}, speaker, confirm, true)
+	} else {
+		ctlPlan([]string{text}, true, speaker, confirm)
 	}
 }
 
 // listenAndTranscribe captures one hands-free utterance and returns its text.
 // A stale recording must never survive into the turn (the assistant would
 // transcribe its own past and repeat itself), so the WAV is deleted first.
-func listenAndTranscribe(ctx context.Context, wav string) (string, bool) {
+// quiet suppresses the per-turn chatter — the always-on service would
+// otherwise narrate every noise in the room into the journal.
+func listenAndTranscribe(ctx context.Context, wav string, quiet bool) (string, bool) {
 	_ = os.Remove(wav)
-	fmt.Println("listening…")
+	if !quiet {
+		fmt.Println("listening…")
+	}
 	clearWave := listeningWave()
 	err := mic.ListenOnce(ctx, wav)
 	clearWave()
@@ -951,10 +965,106 @@ func listenAndTranscribe(ctx context.Context, wav string) (string, bool) {
 		return "", false
 	}
 	if text == "" {
-		fmt.Println("heard nothing")
+		if !quiet {
+			fmt.Println("heard nothing")
+		}
 		return "", false
 	}
 	return text, true
+}
+
+// wakeWords parses HYPRVALET_WAKE_WORD: comma-separated alternates (so
+// habitual speech-recognition near-misses can be whitelisted without code),
+// defaulting to "jarvis".
+func wakeWords() map[string]bool {
+	raw := strings.TrimSpace(os.Getenv("HYPRVALET_WAKE_WORD"))
+	if raw == "" {
+		raw = "jarvis"
+	}
+	set := map[string]bool{}
+	for _, w := range strings.Split(raw, ",") {
+		if w = strings.ToLower(strings.TrimSpace(w)); w != "" {
+			set[w] = true
+		}
+	}
+	return set
+}
+
+// stripWake reports whether the utterance addresses the assistant by a wake
+// word within its first two words, and returns the remainder — the command
+// spoken in the same breath ("jarvis, abrí el navegador" → "abrí el
+// navegador"). Everything that does not wake is the room's business, not ours.
+func stripWake(text string, wakes map[string]bool) (string, bool) {
+	words := strings.Fields(text)
+	limit := 2
+	if len(words) < limit {
+		limit = len(words)
+	}
+	for i := 0; i < limit; i++ {
+		if wakes[strings.Trim(strings.ToLower(words[i]), ".,!?¡¿;:")] {
+			return strings.TrimSpace(strings.TrimLeft(strings.Join(words[i+1:], " "), ".,!?¡¿;: ")), true
+		}
+	}
+	return "", false
+}
+
+// listenCmd is the always-on presence: a headless service that hears the room,
+// discards everything that does not address it — ambient speech is transcribed
+// locally ONLY to check for the wake word, then dropped — and serves the turn
+// that does. Say "jarvis, abrí el navegador" in one breath, or just "jarvis"
+// and it answers "¿Señor?" and waits for the command.
+func listenCmd() {
+	wav := filepath.Join(os.TempDir(), fmt.Sprintf("hyprvalet-listen-%d.wav", os.Getpid()))
+	defer os.Remove(wav)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	speaker := animated{speakerChain()}
+	confirm := func(question string) bool { return voiceConfirm(ctx, speaker, question, wav) }
+	wakes := wakeSetString()
+	fmt.Printf("always-on: waiting for the wake word (%s)\n", wakes)
+
+	set := wakeWords()
+	for {
+		text, ok := listenAndTranscribe(ctx, wav, true)
+		if ctx.Err() != nil {
+			return
+		}
+		if !ok {
+			continue
+		}
+		rest, woken := stripWake(text, set)
+		if !woken {
+			continue // the room's conversation is not ours to keep
+		}
+		fmt.Printf("heard: %s\n", text)
+
+		if rest == "" {
+			// Addressed by name alone: acknowledge and wait for the command.
+			say(speaker, phrase("attending"))
+			rest, ok = listenAndTranscribe(ctx, wav, true)
+			if !ok {
+				continue
+			}
+			fmt.Printf("heard: %s\n", rest)
+		}
+		if farewells[normalizeUtterance(rest)] {
+			say(speaker, phrase("bye"))
+			continue // a goodbye ends the exchange, not the presence
+		}
+		processTurn(rest, speaker, confirm)
+	}
+}
+
+// wakeSetString renders the configured wake words for the startup line.
+func wakeSetString() string {
+	var words []string
+	for w := range wakeWords() {
+		words = append(words, w)
+	}
+	sort.Strings(words)
+	return strings.Join(words, ", ")
 }
 
 // voiceConfirm is the spoken confirmation gate: ask aloud, listen for an
@@ -964,7 +1074,7 @@ func listenAndTranscribe(ctx context.Context, wav string) (string, bool) {
 func voiceConfirm(ctx context.Context, speaker speech.Speaker, question, wav string) bool {
 	fmt.Println(question + " — say yes or no")
 	say(speaker, phrase("confirm"))
-	text, ok := listenAndTranscribe(ctx, wav)
+	text, ok := listenAndTranscribe(ctx, wav, false)
 	if !ok {
 		return false
 	}
@@ -1087,20 +1197,22 @@ func sayCmd(rest []string) {
 // installed TTS voice (HYPRVALET_VOICE) — they are two halves of one choice.
 var spokenPhrases = map[string]map[string]string{
 	"English": {
-		"done":    "Done.",
-		"stopped": "I had to stop.",
-		"denied":  "That is not permitted.",
-		"nothing": "I found nothing I can do for that.",
-		"bye":     "Goodbye.",
-		"confirm": "Shall I proceed?",
+		"done":      "Done.",
+		"stopped":   "I had to stop.",
+		"denied":    "That is not permitted.",
+		"nothing":   "I found nothing I can do for that.",
+		"bye":       "Goodbye.",
+		"confirm":   "Shall I proceed?",
+		"attending": "Sir?",
 	},
 	"Spanish": {
-		"done":    "Listo.",
-		"stopped": "Tuve que detenerme.",
-		"denied":  "Eso no está permitido.",
-		"nothing": "No encontré nada que pueda hacer con eso.",
-		"bye":     "Hasta luego.",
-		"confirm": "¿Procedo?",
+		"done":      "Listo.",
+		"stopped":   "Tuve que detenerme.",
+		"denied":    "Eso no está permitido.",
+		"nothing":   "No encontré nada que pueda hacer con eso.",
+		"bye":       "Hasta luego.",
+		"confirm":   "¿Procedo?",
+		"attending": "¿Señor?",
 	},
 }
 
