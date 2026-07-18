@@ -88,6 +88,43 @@ func (v *vad) reset() {
 	v.length = 0
 }
 
+// ring is a fixed-size circular buffer of frame energies whose minimum is the
+// live noise floor. Keeping the last ~1s means a passing noise ages out and the
+// floor returns to the room's true quiet.
+type ring struct {
+	buf  []float64
+	i    int
+	full bool
+}
+
+func newRing(n int) *ring { return &ring{buf: make([]float64, n)} }
+
+func (r *ring) push(v float64) {
+	r.buf[r.i] = v
+	r.i = (r.i + 1) % len(r.buf)
+	if r.i == 0 {
+		r.full = true
+	}
+}
+
+// min returns the smallest value currently held (the noise floor).
+func (r *ring) min() float64 {
+	n := r.i
+	if r.full {
+		n = len(r.buf)
+	}
+	if n == 0 {
+		return 0
+	}
+	m := r.buf[0]
+	for j := 1; j < n; j++ {
+		if r.buf[j] < m {
+			m = r.buf[j]
+		}
+	}
+	return m
+}
+
 // percentile returns the value at fraction p (0..1) of the sorted samples — a
 // noise-floor estimate robust to speech mixed into the calibration window.
 func percentile(samples []float64, p float64) float64 {

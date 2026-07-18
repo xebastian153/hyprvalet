@@ -87,3 +87,19 @@ func TestPercentileRobustToSpeech(t *testing.T) {
 		t.Fatal("empty samples must be 0")
 	}
 }
+
+func TestRingMinTracksFloorAndAgesOut(t *testing.T) {
+	r := newRing(3)
+	r.push(100)
+	r.push(50)
+	r.push(80)
+	if r.min() != 50 {
+		t.Fatalf("min = %.0f, want 50", r.min())
+	}
+	// The 50 ages out; a passing dip does not pin the floor forever.
+	r.push(200)
+	r.push(200)
+	if r.min() != 80 {
+		t.Fatalf("min after aging = %.0f, want 80", r.min())
+	}
+}

@@ -40,6 +40,10 @@ const (
 	// nothing means the recorder has wedged, and the turn must end rather than
 	// hang the whole session.
 	stallTimeout = 3 * time.Second
+
+	// floorFrames is the sliding window (~1s) whose minimum is the live noise
+	// floor the trigger threshold follows.
+	floorFrames = 33
 )
 
 // ListenOnce blocks until one spoken utterance is captured, then writes it as
@@ -139,6 +143,15 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 		maxFrames:     maxUtterance,
 	}, threshold)
 
+	// floorWindow tracks the quietest recent frames so the threshold follows the
+	// room CONTINUOUSLY, not from a single fragile 750ms snapshot. A moment of
+	// noise during calibration no longer poisons the whole turn: within a
+	// second of quiet, the floor — and the threshold — settle to the truth.
+	floorWindow := newRing(floorFrames)
+	for _, l := range levels {
+		floorWindow.push(l)
+	}
+
 	var preRoll [][]byte
 	var utterance []byte
 	var elapsed time.Duration
@@ -149,6 +162,16 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 		if err := readFrame(); err != nil {
 			return err
 		}
+		rms := frameRMS(frame)
+
+		// Adapt the threshold from the live noise floor while still waiting for
+		// speech; freeze it once an utterance is underway so a rising floor
+		// cannot cut a phrase short.
+		if len(utterance) == 0 {
+			floorWindow.push(rms)
+			det.threshold = math.Max(floorWindow.min()*thresholdFactor, thresholdMin)
+		}
+
 		// Idle only governs the silence BEFORE speech begins; once an utterance
 		// is underway it always finishes. Time is counted in frames read, so it
 		// needs no clock.
@@ -159,7 +182,7 @@ func ListenOnce(ctx context.Context, wavPath string, idle time.Duration) error {
 			}
 		}
 
-		switch det.feed(frameRMS(frame)) {
+		switch det.feed(rms) {
 		case vadStart:
 			// The trigger frames themselves live in the pre-roll; keep it all.
 			for _, f := range preRoll {
