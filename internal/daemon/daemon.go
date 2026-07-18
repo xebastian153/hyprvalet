@@ -15,6 +15,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
@@ -57,6 +58,8 @@ type command struct {
 type Daemon struct {
 	reg     *core.Registry
 	rules   core.PolicyRules
+	planner core.PlannerPort // multi-step reasoning (ask/plan); read-only after New
+	llm     core.LLMPort     // single-intent reasoning (ask); read-only after New
 	arm     core.ArmState
 	session core.SessionAllow
 	history []core.ActionRecord
@@ -65,8 +68,10 @@ type Daemon struct {
 }
 
 // New builds a daemon, seeding its in-memory state from the persisted files so
-// it inherits the current arming and session grants.
-func New(reg *core.Registry, rules core.PolicyRules, logger *log.Logger) *Daemon {
+// it inherits the current arming and session grants. The reasoning ports (LLM
+// and planner) are injected so the core stays behind its interfaces; production
+// passes one Ollama client for both.
+func New(reg *core.Registry, rules core.PolicyRules, planner core.PlannerPort, llm core.LLMPort, logger *log.Logger) *Daemon {
 	now := time.Now()
 	arm, _ := policyfile.LoadArmState(policyfile.ArmStatePath(), now)
 	session, _ := policyfile.LoadSessionAllow(policyfile.SessionAllowPath())
@@ -74,6 +79,8 @@ func New(reg *core.Registry, rules core.PolicyRules, logger *log.Logger) *Daemon
 	return &Daemon{
 		reg:     reg,
 		rules:   rules,
+		planner: planner,
+		llm:     llm,
 		arm:     arm,
 		session: session,
 		history: core.PruneActions(history, now, core.DoomLoopWindow),
@@ -119,9 +126,8 @@ func (d *Daemon) acceptLoop(ln net.Listener) {
 	}
 }
 
-// serveConn reads requests from one connection and writes a reply for each,
-// forwarding every request to the actor via the mailbox. It never touches daemon
-// state directly, so it needs no synchronization.
+// serveConn reads requests from one connection and writes a reply for each. It
+// never touches mutable daemon state directly, so it needs no synchronization.
 func (d *Daemon) serveConn(conn net.Conn) {
 	defer conn.Close()
 	dec := json.NewDecoder(conn)
@@ -131,11 +137,28 @@ func (d *Daemon) serveConn(conn net.Conn) {
 		if err := dec.Decode(&req); err != nil {
 			return // EOF or a broken connection
 		}
-		reply := make(chan protocol.Response, 1)
-		d.mailbox <- command{req: req, reply: reply}
-		if err := enc.Encode(<-reply); err != nil {
+		if err := enc.Encode(d.dispatch(req)); err != nil {
 			return
 		}
+	}
+}
+
+// dispatch routes one request. Ask/Plan reason with the LLM — slow I/O that
+// touches no mutable state — so they run HERE, on the connection goroutine, and
+// only dip into the actor (through the mailbox) for the fast policy evaluations
+// they need. Keeping a multi-second model call off the actor is what lets a
+// concurrent ping still answer instantly. Every state-owning op is funneled to
+// the actor, which processes them one at a time with no locks.
+func (d *Daemon) dispatch(req protocol.Request) protocol.Response {
+	switch req.Op {
+	case protocol.OpAsk:
+		return d.reasonAsk(req)
+	case protocol.OpPlan:
+		return d.reasonPlan(req)
+	default:
+		reply := make(chan protocol.Response, 1)
+		d.mailbox <- command{req: req, reply: reply}
+		return <-reply
 	}
 }
 
@@ -154,9 +177,24 @@ func (d *Daemon) handle(req protocol.Request) protocol.Response {
 		return protocol.Response{Status: protocol.StatusCaps, Caps: caps}
 	case protocol.OpRun:
 		return d.handleRun(req)
+	case protocol.OpEvaluate:
+		return d.handleEvaluate(req)
 	default:
 		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("unknown op %q", req.Op)}
 	}
+}
+
+// handleEvaluate returns the current policy decision for a capability without
+// running it. It runs ON the actor, so it reads the live arming and session
+// state — the reasoning goroutine calls it (via the mailbox) to bind a plan
+// against a world only the actor owns.
+func (d *Daemon) handleEvaluate(req protocol.Request) protocol.Response {
+	cap, ok := d.reg.Get(req.Cap)
+	if !ok {
+		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("unknown capability %q", req.Cap)}
+	}
+	dec := core.Decide(d.rules, d.arm, d.session, cap, time.Now())
+	return protocol.Response{Status: protocol.StatusDecision, Text: dec.String()}
 }
 
 // handleRun runs one capability. A resident daemon must never auto-run something
@@ -197,4 +235,80 @@ func (d *Daemon) handleRun(req protocol.Request) protocol.Response {
 		out = cap.ID() + " ok"
 	}
 	return protocol.Response{Status: protocol.StatusRan, Text: out}
+}
+
+// reasonAsk maps a natural-language request to a single typed intent and returns
+// it as a one-step, policy-bound plan — never running it. It runs on the
+// connection goroutine (the model call is slow and stateless); only the final
+// policy binding touches the actor. A hallucinated capability is caught by
+// ResolveIntent against the allowlist before it can reach a preview.
+func (d *Daemon) reasonAsk(req protocol.Request) protocol.Response {
+	request := strings.TrimSpace(req.Text)
+	if request == "" {
+		return protocol.Response{Status: protocol.StatusError, Error: "empty request"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	intent, err := d.llm.Interpret(ctx, request, d.reg.List())
+	cancel()
+	if err != nil {
+		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("reasoning failed: %v", err)}
+	}
+	cap, err := core.ResolveIntent(d.reg, intent)
+	if err != nil {
+		// No match is a valid outcome, not a wire error: reply planned with no
+		// steps so the client can say "nothing matched" and show the rationale.
+		return protocol.Response{Status: protocol.StatusPlanned, Reasoning: intent.Reasoning}
+	}
+	return protocol.Response{
+		Status:    protocol.StatusPlanned,
+		Reasoning: intent.Reasoning,
+		Plan: []protocol.PlanStep{{
+			Cap:      cap.ID(),
+			Args:     map[string]string(intent.Args),
+			Decision: d.evaluate(cap.ID()),
+		}},
+	}
+}
+
+// reasonPlan maps a natural-language request to an ordered, validated,
+// policy-bound plan and returns it without running anything. Like reasonAsk it
+// reasons off the actor and binds each step through it. The plan is validated
+// against the allowlist and the lifecycle guard, so no previewed step can name
+// an unregistered capability or try to restart the host.
+func (d *Daemon) reasonPlan(req protocol.Request) protocol.Response {
+	request := strings.TrimSpace(req.Text)
+	if request == "" {
+		return protocol.Response{Status: protocol.StatusError, Error: "empty request"}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	plan, err := d.planner.Plan(ctx, request, d.reg.List())
+	cancel()
+	if err != nil {
+		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("planning failed: %v", err)}
+	}
+	if len(plan.Steps) == 0 {
+		// A valid "nothing to do", not an error: planned with no steps.
+		return protocol.Response{Status: protocol.StatusPlanned, Summary: plan.Summary}
+	}
+	if err := plan.Validate(d.reg); err != nil {
+		return protocol.Response{Status: protocol.StatusError, Error: fmt.Sprintf("invalid plan: %v", err)}
+	}
+	steps := make([]protocol.PlanStep, len(plan.Steps))
+	for i, s := range plan.Steps {
+		steps[i] = protocol.PlanStep{
+			Cap:      s.Capability,
+			Args:     map[string]string(s.Args),
+			Decision: d.evaluate(s.Capability),
+		}
+	}
+	return protocol.Response{Status: protocol.StatusPlanned, Summary: plan.Summary, Plan: steps}
+}
+
+// evaluate asks the actor goroutine for the current policy decision on a
+// capability without running it. It is how the reasoning goroutine binds a plan
+// against the live arming and session state the actor alone owns.
+func (d *Daemon) evaluate(capID string) string {
+	reply := make(chan protocol.Response, 1)
+	d.mailbox <- command{req: protocol.Request{Op: protocol.OpEvaluate, Cap: capID}, reply: reply}
+	return (<-reply).Text
 }

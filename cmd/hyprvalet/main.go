@@ -122,6 +122,9 @@ func usage() {
 	fmt.Println("  hyprvalet daemon                     run the long-lived daemon (Unix socket)")
 	fmt.Println("  hyprvalet ping                       check the daemon is alive")
 	fmt.Println("  hyprvalet ctl run <cap> [k=v ...]    run a capability via the daemon (confirms if needed)")
+	fmt.Println("  hyprvalet ctl ask \"<request>\"        reason one capability in the daemon, then run it")
+	fmt.Println("  hyprvalet ctl plan \"<request>\"       preview a daemon-reasoned plan (nothing runs)")
+	fmt.Println("  hyprvalet ctl do \"<request>\"         reason, confirm once, then run the plan via the daemon")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -645,7 +648,9 @@ func daemonCmd(reg *core.Registry, rules core.PolicyRules) {
 		ln.Close()
 	}()
 
-	d := daemon.New(reg, rules, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
+	// One Ollama client serves both reasoning ports (LLMPort + PlannerPort).
+	llm := ollama.Default()
+	d := daemon.New(reg, rules, llm, llm, log.New(os.Stderr, "hyprvalet-daemon ", log.LstdFlags))
 	if err := d.Run(ctx, ln); err != nil {
 		fmt.Fprintf(os.Stderr, "daemon error: %v\n", err)
 		os.Exit(1)
@@ -679,9 +684,154 @@ func ctlCmd(args []string) {
 			os.Exit(2)
 		}
 		ctlRun(args[1], args[2:])
+	case "ask":
+		ctlAsk(args[1:])
+	case "plan":
+		ctlPlan(args[1:], false)
+	case "do":
+		ctlPlan(args[1:], true)
 	default:
-		fmt.Fprintf(os.Stderr, "unknown ctl op %q (want ping|run)\n", args[0])
+		fmt.Fprintf(os.Stderr, "unknown ctl op %q (want ping|run|ask|plan|do)\n", args[0])
 		os.Exit(2)
+	}
+}
+
+// ctlAsk has the daemon reason a single intent from natural language, previews
+// it, then runs it through the daemon's two-phase confirm flow — the reasoning
+// lives in the resident process; the human prompt stays here in the client.
+func ctlAsk(rest []string) {
+	request := strings.TrimSpace(strings.Join(rest, " "))
+	if request == "" {
+		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl ask \"<what you want>\"")
+		os.Exit(2)
+	}
+	resp, err := daemon.AskViaDaemon(daemon.SocketPath(), request)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	if resp.Status == protocol.StatusError {
+		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+	if len(resp.Plan) == 0 {
+		fmt.Println("no match — the model found nothing it could do for that request")
+		if resp.Reasoning != "" {
+			fmt.Printf("  reasoning: %s\n", resp.Reasoning)
+		}
+		return
+	}
+
+	step := resp.Plan[0]
+	fmt.Printf("understood: %s %s\n", step.Cap, formatArgs(core.Args(step.Args)))
+	if resp.Reasoning != "" {
+		fmt.Printf("  reasoning: %s\n", resp.Reasoning)
+	}
+
+	run, err := daemon.RunViaDaemon(daemon.SocketPath(), step.Cap, step.Args, func(reason string) bool {
+		return promptYes(reason + " — proceed?")
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	reportRun(run)
+}
+
+// ctlPlan has the daemon reason a multi-step plan (already validated and bound to
+// the policy). With execute=false ("ctl plan") it previews only; with
+// execute=true ("ctl do") it refuses a plan that has a denied step, confirms the
+// whole plan once, then runs each step through the daemon — reusing the per-step
+// confirm flow, with the daemon re-checking each step for TOCTOU.
+func ctlPlan(rest []string, execute bool) {
+	request := strings.TrimSpace(strings.Join(rest, " "))
+	if request == "" {
+		fmt.Fprintln(os.Stderr, "usage: hyprvalet ctl plan|do \"<what you want>\"")
+		os.Exit(2)
+	}
+	resp, err := daemon.PlanViaDaemon(daemon.SocketPath(), request)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
+	}
+	if resp.Status == protocol.StatusError {
+		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
+		os.Exit(1)
+	}
+	if len(resp.Plan) == 0 {
+		fmt.Println("no plan — the model found nothing it could do for that request")
+		return
+	}
+
+	if resp.Summary != "" {
+		fmt.Printf("plan: %s\n", resp.Summary)
+	}
+	var blockers []string
+	for i, s := range resp.Plan {
+		fmt.Printf("  %d. %s %s  [%s]\n", i+1, s.Cap, formatArgs(core.Args(s.Args)), s.Decision)
+		if s.Decision == core.DecisionDeny.String() {
+			blockers = append(blockers,
+				fmt.Sprintf("step %d (%s) is blocked — denied by policy or needs arming (try 'hyprvalet arm %s')", i+1, s.Cap, s.Cap))
+		}
+	}
+	if len(blockers) > 0 {
+		fmt.Fprintln(os.Stderr, "this plan cannot run:")
+		for _, b := range blockers {
+			fmt.Fprintf(os.Stderr, "  - %s\n", b)
+		}
+		os.Exit(1)
+	}
+
+	if !execute {
+		return // `ctl plan` previews only
+	}
+	if !promptYes(fmt.Sprintf("execute this %d-step plan?", len(resp.Plan))) {
+		fmt.Println("aborted")
+		return
+	}
+
+	n := len(resp.Plan)
+	for i, s := range resp.Plan {
+		run, err := daemon.RunStep(daemon.SocketPath(), s.Cap, s.Args)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %v\n", i+1, n, s.Cap, err)
+			os.Exit(1)
+		}
+		switch run.Status {
+		case protocol.StatusRan:
+			fmt.Printf("  [%d/%d] %s\n", i+1, n, run.Text)
+		case protocol.StatusDenied:
+			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): no longer permitted (state changed since preview)\n", i+1, n, s.Cap)
+			os.Exit(1)
+		case protocol.StatusNeedsConfirm:
+			// The plan was approved as a whole, yet the daemon now wants a
+			// confirmation: a doom-loop tripped mid-plan. Stop rather than hammer.
+			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Text)
+			os.Exit(1)
+		default:
+			fmt.Fprintf(os.Stderr, "plan aborted at step %d/%d (%s): %s\n", i+1, n, s.Cap, run.Error)
+			os.Exit(1)
+		}
+	}
+	fmt.Println("plan done")
+}
+
+// reportRun prints the outcome of a single daemon run and exits nonzero on a
+// denial or error, so ctl commands share one result-handling shape.
+func reportRun(resp protocol.Response) {
+	switch resp.Status {
+	case protocol.StatusRan:
+		if resp.Text != "" {
+			fmt.Println(resp.Text)
+		}
+	case protocol.StatusDenied:
+		fmt.Fprintf(os.Stderr, "denied: %s\n", resp.Text)
+		os.Exit(1)
+	case protocol.StatusError:
+		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
+		os.Exit(1)
+	default:
+		fmt.Printf("%s: %s\n", resp.Status, resp.Text)
 	}
 }
 
@@ -700,20 +850,7 @@ func ctlRun(id string, rest []string) {
 		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
-	switch resp.Status {
-	case protocol.StatusRan:
-		if resp.Text != "" {
-			fmt.Println(resp.Text)
-		}
-	case protocol.StatusDenied:
-		fmt.Fprintf(os.Stderr, "denied: %s\n", resp.Text)
-		os.Exit(1)
-	case protocol.StatusError:
-		fmt.Fprintf(os.Stderr, "error: %s\n", resp.Error)
-		os.Exit(1)
-	default:
-		fmt.Printf("%s: %s\n", resp.Status, resp.Text)
-	}
+	reportRun(resp)
 }
 
 func parseArgs(rest []string) (core.Args, error) {

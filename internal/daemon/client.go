@@ -27,6 +27,28 @@ func RunViaDaemon(socketPath, cap string, args map[string]string, confirm func(r
 	return Send(socketPath, protocol.Request{Op: protocol.OpRun, Cap: cap, Args: args, Approved: true})
 }
 
+// AskViaDaemon has the daemon reason a single intent from a natural-language
+// request and return it unexecuted (a one-step, policy-bound plan). Execution is
+// the caller's job — a separate OpRun through RunViaDaemon's confirm flow.
+func AskViaDaemon(socketPath, request string) (protocol.Response, error) {
+	return Send(socketPath, protocol.Request{Op: protocol.OpAsk, Text: request})
+}
+
+// PlanViaDaemon has the daemon reason an ordered, validated, policy-bound plan
+// from a natural-language request and return it unexecuted. The caller previews
+// it, and runs each step with RunStep after one confirmation.
+func PlanViaDaemon(socketPath, request string) (protocol.Response, error) {
+	return Send(socketPath, protocol.Request{Op: protocol.OpPlan, Text: request})
+}
+
+// RunStep runs one already-approved plan step through the daemon. The whole plan
+// was confirmed up front, so it sends Approved directly; the daemon still
+// re-evaluates the step against live state (TOCTOU), so a grant that expired
+// since the preview blocks it instead of slipping through on the stale approval.
+func RunStep(socketPath, cap string, args map[string]string) (protocol.Response, error) {
+	return Send(socketPath, protocol.Request{Op: protocol.OpRun, Cap: cap, Args: args, Approved: true})
+}
+
 // Send is the thin client: it opens a connection to the daemon at socketPath,
 // sends one request, and returns the one response. A refused connection is
 // reported with a hint that the daemon may not be running.

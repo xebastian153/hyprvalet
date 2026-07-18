@@ -50,6 +50,42 @@ func testDaemon(t *testing.T, rules core.PolicyRules, caps ...core.Capability) *
 	}
 }
 
+// fakePlanner and fakeLLM are canned reasoning ports: they let the daemon's
+// ask/plan path be tested end to end with no Ollama, no network, and a plan the
+// test fully controls.
+type fakePlanner struct {
+	plan core.Plan
+	err  error
+}
+
+func (f fakePlanner) Plan(context.Context, string, []core.Capability) (core.Plan, error) {
+	return f.plan, f.err
+}
+
+type fakeLLM struct {
+	intent core.Intent
+	err    error
+}
+
+func (f fakeLLM) Interpret(context.Context, string, []core.Capability) (core.Intent, error) {
+	return f.intent, f.err
+}
+
+// runDaemon starts a daemon on a fresh temp socket and returns its path; the
+// daemon and socket are torn down when the test ends.
+func runDaemon(t *testing.T, d *Daemon) string {
+	t.Helper()
+	socket := filepath.Join(t.TempDir(), "d.sock")
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); ln.Close() })
+	go func() { _ = d.Run(ctx, ln) }()
+	return socket
+}
+
 func TestHandlePingAndList(t *testing.T) {
 	d := testDaemon(t, core.PolicyRules{}, demoCap{id: "a.b"})
 
@@ -146,20 +182,10 @@ func TestHandleRunApproved(t *testing.T) {
 	})
 }
 
-// serveDaemon starts a daemon on a fresh temp socket and returns its path. The
-// daemon and its socket are torn down when the test ends.
+// serveDaemon starts a daemon serving one demo capability and returns its socket.
 func serveDaemon(t *testing.T, rules core.PolicyRules, ran *bool) string {
 	t.Helper()
-	socket := filepath.Join(t.TempDir(), "d.sock")
-	ln, err := net.Listen("unix", socket)
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	d := testDaemon(t, rules, demoCap{id: "a.b", ran: ran})
-	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(func() { cancel(); ln.Close() })
-	go func() { _ = d.Run(ctx, ln) }()
-	return socket
+	return runDaemon(t, testDaemon(t, rules, demoCap{id: "a.b", ran: ran}))
 }
 
 func TestRunViaDaemonConfirmation(t *testing.T) {
@@ -212,4 +238,101 @@ func TestSocketRoundTrip(t *testing.T) {
 	}
 	cancel()
 	_ = ln.Close()
+}
+
+func TestReasonAskBindsSingleIntent(t *testing.T) {
+	ran := false
+	allow := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAllow}}}
+	d := testDaemon(t, allow, demoCap{id: "a.b", ran: &ran})
+	d.llm = fakeLLM{intent: core.Intent{Capability: "a.b", Args: core.Args{"x": "1"}, Reasoning: "because"}}
+	socket := runDaemon(t, d)
+
+	resp, err := AskViaDaemon(socket, "do the thing")
+	if err != nil {
+		t.Fatalf("AskViaDaemon: %v", err)
+	}
+	if resp.Status != protocol.StatusPlanned || len(resp.Plan) != 1 {
+		t.Fatalf("ask = %+v", resp)
+	}
+	step := resp.Plan[0]
+	if step.Cap != "a.b" || step.Decision != "allow" || step.Args["x"] != "1" {
+		t.Fatalf("bound step = %+v", step)
+	}
+	if resp.Reasoning != "because" {
+		t.Fatalf("reasoning = %q", resp.Reasoning)
+	}
+	if ran {
+		t.Fatal("ask must reason only — it must not run the capability")
+	}
+}
+
+func TestReasonAskNoMatch(t *testing.T) {
+	d := testDaemon(t, core.PolicyRules{}, demoCap{id: "a.b"})
+	// The model chose a capability that is not registered: the allowlist check in
+	// ResolveIntent turns that into an empty, harmless "no match", not a run.
+	d.llm = fakeLLM{intent: core.Intent{Capability: "not.registered", Reasoning: "guessing"}}
+	socket := runDaemon(t, d)
+
+	resp, err := AskViaDaemon(socket, "do something impossible")
+	if err != nil {
+		t.Fatalf("AskViaDaemon: %v", err)
+	}
+	if resp.Status != protocol.StatusPlanned || len(resp.Plan) != 0 {
+		t.Fatalf("expected planned with no steps, got %+v", resp)
+	}
+}
+
+func TestReasonPlanBindsAndDoesNotRun(t *testing.T) {
+	ran := false
+	rules := core.PolicyRules{ByCapID: map[string]core.Rule{
+		"a.b": {Decision: core.DecisionAllow},
+		"c.d": {Decision: core.DecisionDeny},
+	}}
+	d := testDaemon(t, rules, demoCap{id: "a.b", ran: &ran}, demoCap{id: "c.d"})
+	d.planner = fakePlanner{plan: core.Plan{
+		Summary: "two steps",
+		Steps:   []core.Step{{Capability: "a.b"}, {Capability: "c.d"}},
+	}}
+	socket := runDaemon(t, d)
+
+	resp, err := PlanViaDaemon(socket, "go")
+	if err != nil {
+		t.Fatalf("PlanViaDaemon: %v", err)
+	}
+	if resp.Status != protocol.StatusPlanned || resp.Summary != "two steps" || len(resp.Plan) != 2 {
+		t.Fatalf("plan = %+v", resp)
+	}
+	if resp.Plan[0].Decision != "allow" || resp.Plan[1].Decision != "deny" {
+		t.Fatalf("decisions = %q, %q (want allow, deny)", resp.Plan[0].Decision, resp.Plan[1].Decision)
+	}
+	if ran {
+		t.Fatal("plan must preview only — it must not run any step")
+	}
+}
+
+func TestReasonPlanEmptyIsNotAnError(t *testing.T) {
+	d := testDaemon(t, core.PolicyRules{})
+	d.planner = fakePlanner{plan: core.Plan{Summary: "nothing to do"}}
+	socket := runDaemon(t, d)
+
+	resp, err := PlanViaDaemon(socket, "make coffee")
+	if err != nil {
+		t.Fatalf("PlanViaDaemon: %v", err)
+	}
+	if resp.Status != protocol.StatusPlanned || len(resp.Plan) != 0 {
+		t.Fatalf("empty plan = %+v", resp)
+	}
+}
+
+func TestHandleEvaluateDoesNotRun(t *testing.T) {
+	ran := false
+	allow := core.PolicyRules{ByCapID: map[string]core.Rule{"a.b": {Decision: core.DecisionAllow}}}
+	d := testDaemon(t, allow, demoCap{id: "a.b", ran: &ran})
+	resp := d.handle(protocol.Request{Op: protocol.OpEvaluate, Cap: "a.b"})
+	if resp.Status != protocol.StatusDecision || resp.Text != "allow" {
+		t.Fatalf("evaluate = %+v", resp)
+	}
+	if ran {
+		t.Fatal("evaluate is a dry run — it must not execute the capability")
+	}
 }
