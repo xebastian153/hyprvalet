@@ -42,6 +42,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/remind"
 	"github.com/xebastian153/hyprvalet/internal/adapters/speech"
 	"github.com/xebastian153/hyprvalet/internal/adapters/tts"
+	"github.com/xebastian153/hyprvalet/internal/adapters/web"
 	"github.com/xebastian153/hyprvalet/internal/adapters/whisper"
 	"github.com/xebastian153/hyprvalet/internal/core"
 	"github.com/xebastian153/hyprvalet/internal/daemon"
@@ -54,6 +55,7 @@ func buildRegistry() *core.Registry {
 	all = append(all, media.Capabilities()...)
 	all = append(all, audio.Capabilities()...)
 	all = append(all, remind.Capabilities()...)
+	all = append(all, web.Capabilities()...)
 	for _, c := range all {
 		if err := reg.Register(c); err != nil {
 			// A collision in the allowlist is a build-time mistake, not a
