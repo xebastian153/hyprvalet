@@ -24,6 +24,11 @@ const (
 	// running it — a dry-run the daemon uses to bind a plan against live arming
 	// and session state it alone owns.
 	OpEvaluate Op = "evaluate"
+	// OpRealtime is the streaming voice session over the speech-to-speech
+	// sidecar at ws://127.0.0.1:8765/v1/realtime. Generation stamps each
+	// barge-in turn so stale events can be discarded. Wake-gated: the
+	// daemon only dials after wake-word match.
+	OpRealtime Op = "realtime"
 )
 
 // Request is a typed command from a client to the daemon.
@@ -44,6 +49,10 @@ type Request struct {
 	// its own mistake. Escalation changes only reasoning depth — the resulting
 	// intent walks exactly the same allowlist, policy gate, and validation.
 	Escalate bool `json:"escalate,omitempty"`
+	// Generation is the CancelScope generation for OpRealtime. The daemon
+	// increments it on speech_started (barge-in) so stale generations can be
+	// discarded. Zero value means uninitialized.
+	Generation int `json:"generation,omitempty"`
 }
 
 // Status is the outcome class of a response, so a client can branch without
@@ -59,6 +68,9 @@ const (
 	StatusError        Status = "error"         // malformed request, unknown capability, run failure
 	StatusPlanned      Status = "planned"       // a reasoned, policy-bound plan (ask/plan), nothing run yet
 	StatusDecision     Status = "decision"      // a dry-run policy decision (evaluate)
+	StatusStreaming    Status = "streaming"     // realtime streaming session active
+	StatusCancelled    Status = "cancelled"     // realtime turn cancelled by barge-in (speech_started)
+	StatusQuarantined  Status = "quarantined"   // realtime sidecar quarantined after schema drift / error (180s)
 )
 
 // Response is the daemon's reply to one Request.
@@ -80,6 +92,9 @@ type Response struct {
 	// failures (a dead tool, a broken pipe) are not retryable: re-asking the
 	// model cannot fix the world.
 	Retryable bool `json:"retryable,omitempty"`
+	// Generation echoes the request Generation for OpRealtime so clients can
+	// discard stale events without re-parsing the request.
+	Generation int `json:"generation,omitempty"`
 }
 
 // PlanStep is the wire view of one reasoned step: a chosen capability, the args
