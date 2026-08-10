@@ -226,6 +226,31 @@ For the full desktop experience — an always-on wake-word service and a `SUPER+
 keybinding — see the example units in [`configs/systemd/`](./configs/systemd/)
 and the [`configs/`](./configs/) directory (policy, recipes, echo cancellation).
 
+### Realtime voice (streaming)
+
+Hyprvalet can stream voice through the [`speech-to-speech`](https://github.com/huggingface/speech-to-speech) sidecar over `ws://127.0.0.1:8765/v1/realtime` — Silero VAD + SmartTurn → Parakeet TDT 0.6B → **Cerebras** `google/gemma-4-31B` via `responses_api` at `https://api.cerebras.ai/v1` → Qwen3 TTS (voice **Aiden**). This cuts the batch turn (3.5–4.5 s) to **wake → WS <200 ms, first audio <800 ms, perceived <600 ms** with barge-in (gen++) and 24k→PipeWire resampling (≤6400 B batches).
+
+**Wake-gated** — the daemon/CLI *listen* always, but **never open `ws://127.0.0.1:8765/v1/realtime` before a wake-word match** (`jarvis` + alternates in `HYPRVALET_WAKE_WORD`). A bare `jarvis` greets and waits; `jarvis, abrí el navegador` carries the command in `HYPRVALET_FIRST` so nothing is lost. Until the wake word, PCM stays local.
+
+**Privacy opt-in (0600)** — PCM and `recentEvents` leave the machine **only if `CEREBRAS_API_KEY` is set and `~/.config/hyprvalet/env` is `chmod 0600`** (the systemd `EnvironmentFile=-%h/.config/hyprvalet/env`). Otherwise the chain **degrades to batch** with a visible note and uses local Ollama at `http://localhost:11434/v1`. No local CUDA VRAM is required (GTX 1050 Ti 4 GB constraint) — heavy work lives in the sidecar or cloud.
+
+Enable:
+
+```bash
+uv venv ~/.local/share/hyprvalet/realtime-venv && pip install speech-to-speech==0.2.12
+cp configs/systemd/hyprvalet-realtime.service ~/.config/systemd/user/
+echo "CEREBRAS_API_KEY=..." > ~/.config/hyprvalet/env && chmod 0600 ~/.config/hyprvalet/env
+systemctl --user daemon-reload
+systemctl --user enable --now hyprvalet-realtime
+# gate the CLI
+echo 'HYPRVALET_REALTIME=on' >> ~/.config/hyprvalet/env
+echo 'HYPRVALET_REALTIME_LLM=cerebras' >> ~/.config/hyprvalet/env  # or ollama
+```
+
+`HYPRVALET_REALTIME` (`off|on`, default `off`) and `HYPRVALET_REALTIME_LLM` (`cerebras|ollama`, default `cerebras`) gate the CLI (`voiceCmd`/`listenCmd`). When `off`, unreachable, quarantined (180 s after schema drift / hallucination) or offline, hyprvalet **falls back to batch** (`whisper.cpp` + Ollama/Groq + `piper`/`edge-tts`/`ElevenLabs`) via `fallback.New(realtime, batch)` — degraded quality, never availability — keeping `bargeSpeaker` and 60 s `cap.Run` bounds, discarding stale generations and preserving `SESSION_END` (10 s drain).
+
+Rollback: `HYPRVALET_REALTIME=off` or `systemctl --user stop hyprvalet-realtime` → instant batch fallback; remove the adapter/unit to fully revert. Hexagon purity holds — `go list -f '{{.Imports}}' ./internal/core` shows no `realtime` import; `core` knows only the `Capability`/`Registry` ports, never `hyprctl`, the sidecar, or an LLM.
+
 ### Configuration
 
 Everything is environment-driven; secrets live in a `0600` file read by the
@@ -244,6 +269,10 @@ systemd units.
 | `HYPRVALET_BARGE_IN` | interrupt-while-speaking — needs headphones or echo cancellation |
 | `HYPRVALET_PROJECTS_DIR` | where `project.new` scaffolds — default `~/proyectos` |
 | `HYPRVALET_MEMORY` | long-term memory backend — `engram` (isolated, default when installed) / `jsonl` |
+| `HYPRVALET_REALTIME` | realtime WS toggle — `off` (batch, default) / `on` (streaming, wake-gated) |
+| `HYPRVALET_REALTIME_LLM` | realtime LLM — `cerebras` (default, `google/gemma-4-31B` via `https://api.cerebras.ai/v1`) / `ollama` (`http://localhost:11434/v1` when key missing) |
+| `CEREBRAS_API_KEY` (`~/.config/hyprvalet/env` `0600`) | realtime cloud LLM key — when absent or file not `0600`, PCM stays local and Ollama is used |
+| `HYPRVALET_REALTIME_STUB` | test hook — `ok` makes the realtime stub succeed (for `go test` without sidecar) |
 
 The permission policy is an installer-owned TOML at
 `~/.config/hyprvalet/policy.toml` (see
@@ -253,15 +282,17 @@ fails closed.
 ## Project layout
 
 ```
-cmd/hyprvalet/          CLI + voice frontend
-internal/core/          domain: Capability, AccessKind, Risk, policy, audit, memory
-internal/protocol/      typed daemon/client contract
-internal/daemon/        resident actor-model daemon (Unix socket)
+cmd/hyprvalet/          CLI + voice frontend (wake-gated, HYPRVALET_REALTIME, bargeSpeaker)
+internal/core/          domain: Capability, AccessKind, Risk, policy, audit, memory (no realtime import — hexagon pure)
+internal/protocol/      typed daemon/client contract (OpRealtime, Generation, StatusStreaming/Cancelled/Quarantined)
+internal/daemon/        resident actor-model daemon (Unix socket, OpRealtime generation, TOCTOU, drain/quarantine)
 internal/adapters/
   hypr · omarchy · media · audio · web · remind · project · terminal   capabilities
-  ollama · groq · fallback · prompt                                    reasoning
-  whisper · mic · tts · elevenlabs · edgetts · speech                  voice
+  ollama · groq · fallback · prompt                                    reasoning (fallback.New chain)
+  whisper · mic · tts · elevenlabs · edgetts · speech                  voice (batch)
+  realtime              streaming WS ws://127.0.0.1:8765/v1/realtime (tools 28 caps, CancelScope, resample, fallback, env 0600)
   policyfile · recipefile · eventlog                                   persistence
+configs/systemd/        hyprvalet.service, hyprvalet-listen.service, hyprvalet-realtime.service (Cerebras cloud, 0600)
 docs/DESIGN.md          deep architecture   ·   docs/SOURCES.md   provenance
 ```
 
