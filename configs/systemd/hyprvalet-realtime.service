@@ -1,0 +1,30 @@
+# hyprvalet realtime — speech-to-speech sidecar systemd user service (example)
+#
+# Install:
+#   uv venv ~/.local/share/hyprvalet/realtime-venv && pip install speech-to-speech==0.2.12
+#   cp configs/systemd/hyprvalet-realtime.service ~/.config/systemd/user/
+#   echo "CEREBRAS_API_KEY=..." > ~/.config/hyprvalet/env && chmod 0600 ~/.config/hyprvalet/env
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now hyprvalet-realtime
+#
+# Cloud-first: Cerebras google/gemma-4-31B via responses_api at https://api.cerebras.ai/v1
+# No local GPU VRAM required (GTX 1050 Ti 4GB constraint) — heavy work stays in
+# sidecar (Silero VAD, Parakeet TDT 0.6B, Qwen3 TTS) or cloud LLM.
+# Privacy: PCM leaves machine only if CEREBRAS_API_KEY set (0600 opt-in, file
+# must be chmod 0600); else fallback to Ollama http://localhost:11434/v1.
+
+[Unit]
+Description=hyprvalet realtime — speech-to-speech sidecar (Silero+SmartTurn->Parakeet->Cerebras->Qwen3)
+After=network-online.target pipewire.service
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/share/hyprvalet/realtime-venv/bin/speech-to-speech serve --host 127.0.0.1 --port 8765 --stt parakeet-tdt-0.6b-v2 --tts qwen3 --llm_backend responses_api --model_name google/gemma-4-31B --responses_api_base_url https://api.cerebras.ai/v1
+Restart=on-failure
+RestartSec=2
+EnvironmentFile=-%h/.config/hyprvalet/env
+# CEREBRAS_API_KEY is read from EnvironmentFile (chmod 0600 ~/.config/hyprvalet/env). Never inline secrets here.
+# Voice: Aiden (en) / es-AR variant configurable via --voice.
+
+[Install]
+WantedBy=default.target
