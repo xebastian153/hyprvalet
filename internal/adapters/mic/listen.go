@@ -25,7 +25,7 @@ const (
 	calibrateFrames = 25  // ~750ms of ambient to learn the noise floor
 	preRollFrames   = 10  // ~300ms kept from before the trigger — no clipped first syllable
 	triggerFrames   = 3   // ~90ms of sustained voice starts an utterance
-	endSilenceOf    = 43  // ~1.3s of silence ends it — a thinking pause mid-dictation is longer than a breath
+	endSilenceOf    = 16  // ~480ms of silence ends it — faster turn-taking; breaths (<300ms) still not split, but thinking pauses no longer stall the reply
 	maxUtterance    = 660 // ~20s cap
 
 	// thresholdFactor scales the ambient floor into a voice threshold;

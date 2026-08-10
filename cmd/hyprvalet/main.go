@@ -2032,12 +2032,27 @@ func ctlCmd(args []string) {
 // costs credits) when a key is configured, then edge-tts (free cloud neural),
 // then local piper. The voice degrades in beauty, never in availability — the
 // same resilience shape as the reasoning fallback, applied to the mouth.
+//
+// For speed the order after ElevenLabs is piper-first when explicitly
+// requested via HYPRVALET_TTS_PREFER=piper or when batch mode is active
+// (HYPRVALET_REALTIME=off) and no ElevenLabs key is set: local piper renders
+// in ~323ms vs edge-tts ~1334ms (cloud). The Chain still falls through, so
+// availability never degrades — only the first-try latency.
 func speakerChain() speech.Speaker {
 	var speakers []speech.Speaker
 	if elevenlabs.Available() {
 		speakers = append(speakers, elevenlabs.Default())
 	}
-	speakers = append(speakers, edgetts.Default(), tts.Default())
+	preferPiper := strings.EqualFold(strings.TrimSpace(os.Getenv("HYPRVALET_TTS_PREFER")), "piper")
+	if !preferPiper && !elevenlabs.Available() && !shouldUseRealtime() {
+		// Batch mode without ElevenLabs: speed wins — piper local before cloud.
+		preferPiper = true
+	}
+	if preferPiper {
+		speakers = append(speakers, tts.Default(), edgetts.Default())
+	} else {
+		speakers = append(speakers, edgetts.Default(), tts.Default())
+	}
 	return speech.NewChain(speakers...)
 }
 

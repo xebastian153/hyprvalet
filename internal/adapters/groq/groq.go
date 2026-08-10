@@ -52,7 +52,7 @@ func New(baseURL, model, key string) *Client {
 func Default() *Client {
 	return New(
 		envOr("HYPRVALET_GROQ_URL", "https://api.groq.com/openai/v1"),
-		envOr("HYPRVALET_GROQ_MODEL", "openai/gpt-oss-120b"),
+		envOr("HYPRVALET_GROQ_MODEL", "llama-3.3-70b"),
 		os.Getenv("GROQ_API_KEY"),
 	)
 }
@@ -63,7 +63,7 @@ func Default() *Client {
 func Strong() *Client {
 	return New(
 		envOr("HYPRVALET_GROQ_URL", "https://api.groq.com/openai/v1"),
-		envOr("HYPRVALET_GROQ_MODEL_STRONG", envOr("HYPRVALET_GROQ_MODEL", "openai/gpt-oss-120b")),
+		envOr("HYPRVALET_GROQ_MODEL_STRONG", envOr("HYPRVALET_GROQ_MODEL", "llama-3.3-70b")),
 		os.Getenv("GROQ_API_KEY"),
 	)
 }
