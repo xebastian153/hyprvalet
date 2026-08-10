@@ -346,10 +346,10 @@ func (c *Client) readLoop(conn *websocket.Conn) {
 			continue
 		}
 
-		// Quarantine on schema drift / error
+		// Quarantine on schema drift / error — exact code to avoid false quarantine on benign drift mentions.
 		if typ == "error" {
 			payloadStr := string(msg)
-			if strings.Contains(payloadStr, "schema_drift") || strings.Contains(payloadStr, "quarantine") || strings.Contains(payloadStr, "drift") {
+			if strings.Contains(payloadStr, "schema_drift") {
 				c.mu.Lock()
 				c.quarantinedUntil = time.Now().Add(QuarantineDuration)
 				c.state = stateQuarantined

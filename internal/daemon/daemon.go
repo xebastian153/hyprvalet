@@ -428,28 +428,46 @@ func (d *Daemon) handleRealtime(req protocol.Request) protocol.Response {
 	}
 
 	// 6. Bounded execution (60s) with generation-bound context.
-	// Use a timeout context; if generation is cancelled via RealtimeCancel, the
-	// stored realtimeCtx would be cancelled, but per-request we use a fresh timeout
-	// to prevent hanging the actor. Stale discard has already filtered old gens.
-	runCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	// Also bind to realtime generation context for barge-in cancellation: if a
-	// concurrent RealtimeCancel happens mid-run, the request's gen would have
-	// been stale and discarded before run; for in-flight run, we could watch
-	// realtimeCtx.Done(), but for tests a simple timeout suffices.
-	// To honor barge-in during run, also check if generation becomes stale after run starts.
-	// For simplicity, we run with timeout and let stale be checked pre-run only.
+	realtimeCtx := d.RealtimeContext()
+	runCtx, cancel := context.WithTimeout(realtimeCtx, 60*time.Second)
 	defer cancel()
-	_ = runCtx // placeholder for future generation-bound cancellation
-
-	// Capture current generation for post-run stale check (if barge happened during run)
 	genAtStart := d.RealtimeGeneration()
 
-	out, err := capObj.Run(runCtx, args)
+	type runResult struct {
+		out string
+		err error
+	}
+	ch := make(chan runResult, 1)
+	go func() {
+		o, e := capObj.Run(runCtx, args)
+		ch <- runResult{o, e}
+	}()
+
+	var out string
+	var err error
+	select {
+	case <-realtimeCtx.Done():
+		go func() { <-ch }()
+		return protocol.Response{Status: protocol.StatusCancelled, Text: "stale generation cancelled during run", Generation: req.Generation}
+	case r := <-ch:
+		out, err = r.out, r.err
+	case <-runCtx.Done():
+		if d.RealtimeIsStale(genAtStart) {
+			go func() { <-ch }()
+			return protocol.Response{Status: protocol.StatusCancelled, Text: "stale generation discarded after run", Generation: req.Generation}
+		}
+		if runCtx.Err() == context.DeadlineExceeded {
+			go func() { <-ch }()
+			return protocol.Response{Status: protocol.StatusError, Error: "capability timed out after 60s", Generation: req.Generation}
+		}
+		go func() { <-ch }()
+		return protocol.Response{Status: protocol.StatusCancelled, Text: "stale generation cancelled during run", Generation: req.Generation}
+	}
 	if err != nil {
 		// Validationf is retryable; schema_drift triggers quarantine.
 		if core.IsValidation(err) {
 			msg := err.Error()
-			if strings.Contains(msg, "schema_drift") || strings.Contains(msg, "drift") || strings.Contains(msg, "quarantine") {
+			if strings.Contains(msg, "schema_drift") {
 				d.realtimeMu.Lock()
 				d.realtimeQuarantinedUntil = now.Add(RealtimeQuarantineDuration)
 				d.realtimeSessionActive = false

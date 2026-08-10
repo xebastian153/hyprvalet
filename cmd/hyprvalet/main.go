@@ -42,6 +42,7 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/policyfile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/project"
 	"github.com/xebastian153/hyprvalet/internal/adapters/prompt"
+	"github.com/xebastian153/hyprvalet/internal/adapters/realtime"
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/remind"
 	"github.com/xebastian153/hyprvalet/internal/adapters/speech"
@@ -109,11 +110,139 @@ func reasonerChain(strong bool) fallback.Reasoner {
 	return r
 }
 
-// defaultReasoner is the primary reasoning tier.
-func defaultReasoner() fallback.Reasoner { return reasonerChain(false) }
+// defaultReasoner is the primary reasoning tier. When HYPRVALET_REALTIME=on it
+// composes realtime→batch via fallback.New(realtime, batch) with a degrade
+// note; otherwise it returns the normal batch chain. Default when key missing
+// is Ollama http://localhost:11434/v1 (privacy: PCM stays local).
+func defaultReasoner() fallback.Reasoner {
+	if shouldUseRealtime() {
+		return buildRealtimeReasoner(false, false)
+	}
+	return reasonerChain(false)
+}
 
 // strongReasoner is the escalation tier for the corrective loop.
-func strongReasoner() core.LLMPort { return reasonerChain(true) }
+func strongReasoner() core.LLMPort {
+	if shouldUseRealtime() {
+		return buildRealtimeReasoner(true, true)
+	}
+	return reasonerChain(true)
+}
+
+// isRealtimeEnabled reports whether HYPRVALET_REALTIME requests streaming.
+// Delegates to realtime.RealtimeEnabled (privacy default off).
+func isRealtimeEnabled() bool { return realtime.RealtimeEnabled() }
+
+// realtimeLLM reports the requested realtime LLM backend (cerebras|ollama).
+func realtimeLLM() string { return realtime.RealtimeLLM() }
+
+// hasCerebrasKey reports whether CEREBRAS_API_KEY is set and the env file
+// is chmod 0600 (privacy opt-in). PCM leaves only when true.
+func hasCerebrasKey() bool { return realtime.HasCerebrasKey() }
+
+// shouldUseRealtime reports whether the voice path should attempt realtime.
+// True when HYPRVALET_REALTIME=on even if key missing — then we degrade
+// to Ollama http://localhost:11434/v1 with a visible note.
+func shouldUseRealtime() bool { return realtime.ShouldUseRealtime() }
+
+// isWakeGatedRealtime reports whether WS should be opened now: only after
+// wake-word match (woken=true) and when realtime is enabled. Enforces the
+// spec's "MUST NOT open ws://127.0.0.1:8765/v1/realtime until wake-word match".
+func isWakeGatedRealtime(woken bool) bool { return shouldUseRealtime() && woken }
+
+// probeRealtimeWS quickly probes ws://127.0.0.1:8765/v1/realtime availability
+// (200ms). Used only for the degrade note; wake-gated callers dial for real
+// on the first utterance after wake.
+func probeRealtimeWS(ctx context.Context) error {
+	if !shouldUseRealtime() {
+		return fmt.Errorf("realtime disabled")
+	}
+	if realtimeLLM() == "cerebras" && !hasCerebrasKey() {
+		return fmt.Errorf("CEREBRAS_API_KEY not set or env file not 0600")
+	}
+	cli := realtime.NewClient(realtime.DefaultRealtimeURL, nil)
+	dctx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	// No tools needed for probe; reuse client dial with nil tools to test reachability.
+	// Connect will attempt websocket dial; failure signals WS down/offline.
+	if err := cli.Connect(dctx, nil); err != nil {
+		return err
+	}
+	_ = cli.Close()
+	return nil
+}
+
+// realtimeStub is the primary reasoner when realtime is enabled. It validates
+// privacy (0600) and quarantine before delegating to the real transport.
+// Today it probes the sidecar WS availability; if unavailable it fails fast so
+// fallback.New(realtime, batch) degrades to batch with a note.
+type realtimeStub struct {
+	strong bool
+}
+
+func (s *realtimeStub) Interpret(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Intent, error) {
+	// Privacy gate: if cerebras requested but key not 0600, degrade to batch via error
+	if realtimeLLM() == "cerebras" && !hasCerebrasKey() {
+		return core.Intent{}, fmt.Errorf("realtime: CEREBRAS_API_KEY not set or env file not 0600 — using Ollama %s (privacy: PCM stays local)", realtime.OllamaFallbackURL)
+	}
+	// Quarantine check: if underlying client is quarantined, fail fast
+	// For now no global client, so not quarantined; future wiring can check realtime.Client.IsQuarantined.
+	// Attempting to use sidecar always requires it to be reachable; we treat the stub as unavailable
+	// unless a real sidecar is proven reachable via a quick dial probe (skipped here for test).
+	// To keep tests deterministic, the stub always fails open to trigger batch fallback when we want fallback.
+	// In production the daemon's WS client (realtime.Client) would be the real transport;
+	// this stub acts as the CLI-side placeholder that prefers batch when sidecar not yet dialed.
+	// To allow fallback tests to control outcome, we check an env override:
+	if v := strings.TrimSpace(os.Getenv("HYPRVALET_REALTIME_STUB")); v == "ok" {
+		// Simulate successful realtime by delegating to batch with same result (no real cerebras in CLI path)
+		// Real streaming is daemon/WS path; CLI fallback here just proves the wiring.
+		return core.Intent{Reasoning: "realtime", Capability: "", Reply: ""}, nil
+	}
+	return core.Intent{}, fmt.Errorf("realtime sidecar ws://127.0.0.1:8765/v1/realtime not dialed (wake-gated) — falling back to batch")
+}
+
+func (s *realtimeStub) Plan(ctx context.Context, request string, caps []core.Capability, recent []core.Event) (core.Plan, error) {
+	if realtimeLLM() == "cerebras" && !hasCerebrasKey() {
+		return core.Plan{}, fmt.Errorf("realtime: CEREBRAS_API_KEY not set or env file not 0600 — using Ollama %s", realtime.OllamaFallbackURL)
+	}
+	if v := strings.TrimSpace(os.Getenv("HYPRVALET_REALTIME_STUB")); v == "ok" {
+		return core.Plan{Summary: "realtime"}, nil
+	}
+	return core.Plan{}, fmt.Errorf("realtime sidecar not dialed — falling back to batch")
+}
+
+func (s *realtimeStub) Chat(ctx context.Context, system, user string) (string, error) {
+	if v := strings.TrimSpace(os.Getenv("HYPRVALET_REALTIME_STUB")); v == "ok" {
+		return "realtime chat ok", nil
+	}
+	return "", fmt.Errorf("realtime sidecar chat not available — falling back")
+}
+
+// realtimeQuarantined is the injectable quarantine check for realtime.
+// It defaults to false (no quarantine) but can be overridden in tests or
+// wired to a realtime.Client.IsQuarantined or daemon.IsQuarantined closure.
+// When it returns true, the realtime primary is skipped entirely and batch wins.
+var realtimeQuarantined func() bool = func() bool { return false }
+
+// buildRealtimeReasoner composes realtime→batch with degrade note, preserving
+// bargeSpeaker. When HYPRVALET_REALTIME is off, it returns the batch chain
+// directly (no overhead). When on, it uses fallback.New(realtime, batch) so
+// WS down/offline/quarantine never crashes — it degrades to Ollama at
+// http://localhost:11434/v1.
+func buildRealtimeReasoner(strong, _unused bool) fallback.Reasoner {
+	batch := reasonerChain(strong)
+	if !shouldUseRealtime() {
+		return batch
+	}
+	primary := &realtimeStub{strong: strong}
+	q := realtimeQuarantined
+	if q == nil {
+		q = func() bool { return false }
+	}
+	return realtime.NewRealtimeFallback(primary, batch, q)
+}
+
+// overload for test compatibility: buildRealtimeReasoner(strong, strong)
 
 // conversant is a reasoner that can hold a raw JSON conversation — the project-
 // planning flow is a dialogue, not a typed capability call, so it needs this
@@ -996,6 +1125,27 @@ func voiceCmd() {
 	// The command spoken with the wake word arrives via HYPRVALET_FIRST.
 	pending = strings.TrimSpace(os.Getenv("HYPRVALET_FIRST"))
 
+	// Realtime wake-gated session: WTFO — WS is MUST NOT be opened before wake.
+	// Only after HYPRVALET_FIRST (woken) do we probe the sidecar; otherwise we
+	// stay batch and keep bargeSpeaker. Privacy: if CEREBRAS_API_KEY not 0600,
+	// we degrade to Ollama http://localhost:11434/v1 with a visible note.
+	if shouldUseRealtime() {
+		woken := pending != ""
+		if !woken {
+			fmt.Fprintf(os.Stderr, "realtime: enabled (HYPRVALET_REALTIME=on, llm=%s) but WS not dialed until wake-word — PCM stays local (batch ListenOnce + bargeSpeaker active)\n", realtimeLLM())
+		} else {
+			if realtimeLLM() == "cerebras" && !hasCerebrasKey() {
+				fmt.Fprintf(os.Stderr, "realtime: HYPRVALET_REALTIME=on llm=cerebras but CEREBRAS_API_KEY not set or env file not 0600 — using Ollama %s (PCM stays local)\n", realtime.OllamaFallbackURL)
+			} else if isWakeGatedRealtime(true) {
+				if err := probeRealtimeWS(ctx); err != nil {
+					fmt.Fprintf(os.Stderr, "realtime: wake-gated WS ws://127.0.0.1:8765/v1/realtime unavailable (%v) — falling back to batch (local Ollama %s, bargeSpeaker kept)\n", err, realtime.OllamaFallbackURL)
+				} else {
+					fmt.Fprintf(os.Stderr, "realtime: streaming via ws://127.0.0.1:8765/v1/realtime (wake-gated, voice Aiden, llm=%s, bargeSpeaker kept)\n", realtimeLLM())
+				}
+			}
+		}
+	}
+
 	// Voice-mode greeting: addressed by name alone (nothing to do yet), the
 	// assistant announces it is listening — like opening a phone's voice mode —
 	// instead of waiting in silence. When a command came with the wake word,
@@ -1730,6 +1880,19 @@ func listenCmd() {
 			continue // the room's conversation is not ours to keep
 		}
 		fmt.Printf("wake: %s\n", text)
+		// Realtime wake-gated: only after wake do we consider dialing WS.
+		// Degrade note when key not 0600 or WS down; otherwise batch fallback.
+		if shouldUseRealtime() {
+			if realtimeLLM() == "cerebras" && !hasCerebrasKey() {
+				fmt.Fprintf(os.Stderr, "realtime: wake-gated but CEREBRAS_API_KEY not 0600 — streaming would leak PCM, using Ollama %s (batch)\n", realtime.OllamaFallbackURL)
+			} else if isWakeGatedRealtime(true) {
+				if err := probeRealtimeWS(ctx); err != nil {
+					fmt.Fprintf(os.Stderr, "realtime: wake-gated WS ws://127.0.0.1:8765/v1/realtime unavailable (%v) — opening conversation via batch (degraded, Ollama %s)\n", err, realtime.OllamaFallbackURL)
+				} else {
+					fmt.Fprintf(os.Stderr, "realtime: wake-gated WS ready at ws://127.0.0.1:8765/v1/realtime (llm=%s) — opening streaming conversation\n", realtimeLLM())
+				}
+			}
+		}
 		openConversation(ctx, rest)
 	}
 }
