@@ -48,3 +48,42 @@ func TranscribeWithClient(ctx context.Context, wavPath string, groqClient *groqs
 	}
 	return whisperClient.Transcribe(ctx, wavPath)
 }
+
+// TranscribeWithBackend converts wavPath to text and reports which backend
+// succeeded, for per-step timing labels (e.g. "groq" or "whisper"). It
+// preserves the same cloud-first fallback. The provider name only is returned
+// so the timing line `STT (groq): 465ms` matches the spec without double
+// parentheses; the model is visible in debug logs if needed.
+func TranscribeWithBackend(ctx context.Context, wavPath string) (string, string, error) {
+	if key := strings.TrimSpace(os.Getenv("GROQ_API_KEY")); key != "" {
+		c := groqstt.NewFromEnv()
+		txt, err := c.Transcribe(ctx, wavPath)
+		if err == nil {
+			return txt, "groq", nil
+		}
+		fmt.Fprintf(os.Stderr, "stt: groq cloud transcription failed (%v) — falling back to local whisper.cpp\n", err)
+	}
+	wc := whisper.Default()
+	txt, err := wc.Transcribe(ctx, wavPath)
+	if err != nil {
+		return "", "", err
+	}
+	return txt, "whisper", nil
+}
+
+// TranscribeWithClientAndBackend is the testable variant that also returns the
+// backend label, for unit tests that inject stub clients.
+func TranscribeWithClientAndBackend(ctx context.Context, wavPath string, groqClient *groqstt.Client, whisperClient *whisper.Client) (string, string, error) {
+	if groqClient != nil {
+		txt, err := groqClient.Transcribe(ctx, wavPath)
+		if err == nil {
+			return txt, "groq", nil
+		}
+		fmt.Fprintf(os.Stderr, "stt: groq cloud transcription failed (%v) — falling back to local whisper.cpp\n", err)
+	}
+	txt, err := whisperClient.Transcribe(ctx, wavPath)
+	if err != nil {
+		return "", "", err
+	}
+	return txt, "whisper", nil
+}

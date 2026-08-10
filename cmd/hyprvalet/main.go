@@ -333,7 +333,7 @@ func main() {
 	case "brainstorm":
 		brainstormCmd(args[1:])
 	case "voice":
-		voiceCmd()
+		voiceCmd(args[1:])
 	case "listen":
 		listenCmd()
 	case "say":
@@ -383,8 +383,13 @@ func usage() {
 	fmt.Println("  hyprvalet ctl ask \"<request>\"        reason one capability in the daemon, then run it")
 	fmt.Println("  hyprvalet ctl plan \"<request>\"       preview a daemon-reasoned plan (nothing runs)")
 	fmt.Println("  hyprvalet ctl do \"<request>\"         reason, confirm once, then run the plan via the daemon")
-	fmt.Println("  hyprvalet voice                      speak a request (records until Enter, runs via daemon)")
+	fmt.Println("  hyprvalet voice [--timing]         hands-free conversation (VAD); --timing always shows per-turn latency")
 	fmt.Println("  hyprvalet say \"<text>\"               speak text aloud through the voice chain")
+	fmt.Println()
+	fmt.Println("Voice timing: each turn prints [timing] VAD | STT | LLM | TTS | total to stderr")
+	fmt.Println("  with the backend that succeeded (groq/whisper, groq/ollama/cerebras, piper/edge-tts/elevenlabs).")
+	fmt.Println("  Enabled by default; set HYPRVALET_VOICE_TIMING=0 to silence, or pass --timing /")
+	fmt.Println("  HYPRVALET_VOICE_TIMING=1 to force it (HYPRVALET_REALTIME also enables it).")
 	fmt.Println()
 	fmt.Println("Policy file (installer-owned):")
 	fmt.Printf("  %s\n", policyfile.ConfigPath())
@@ -1084,6 +1089,231 @@ func idleTimeout() time.Duration {
 	return 60 * time.Second
 }
 
+// voiceHelpRequested reports whether the voice args ask for help.
+func voiceHelpRequested(extra []string) bool {
+	for _, a := range extra {
+		switch strings.ToLower(strings.TrimSpace(a)) {
+		case "-h", "--help", "help":
+			return true
+		}
+	}
+	return false
+}
+
+// voiceTimingEnabled reports whether per-turn timing should be printed.
+// Enabled by default (the simplest per spec); HYPRVALET_VOICE_TIMING=0 silences
+// it, --timing or HYPRVALET_VOICE_TIMING=1 forces it, HYPRVALET_REALTIME also
+// implies it for realtime debugging.
+func voiceTimingEnabled(extra []string) bool {
+	for _, a := range extra {
+		if strings.TrimSpace(a) == "--timing" {
+			return true
+		}
+	}
+	if v := strings.ToLower(strings.TrimSpace(os.Getenv("HYPRVALET_VOICE_TIMING"))); v != "" {
+		switch v {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	// Spec simplest: always show timing when voice completes.
+	return true
+}
+
+// voiceHelp prints the voice subcommand help, including the timing note.
+func voiceHelp() {
+	fmt.Println("hyprvalet voice — hands-free conversation (VAD delimited)")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  hyprvalet voice [--timing]     start a hands-free voice session")
+	fmt.Println()
+	fmt.Println("Each turn prints a timing breakdown to stderr:")
+	fmt.Println("  [timing] VAD: 482ms | STT (groq): 465ms | LLM (llama-3.3-70b): 72ms | TTS (piper): 323ms | total: 1.34s")
+	fmt.Println()
+	fmt.Println("Backends are the adapter that actually succeeded:")
+	fmt.Println("  STT: groq (whisper-large-v3) vs whisper (ggml-*.bin fallback)")
+	fmt.Println("  LLM: groq (llama-3.3-70b) / openai (gpt-4o-mini) / ollama (qwen2.5:7b) / cerebras (realtime)")
+	fmt.Println("  TTS: elevenlabs / edge-tts / piper (via speech.Chain)")
+	fmt.Println()
+	fmt.Println("Enable/disable:")
+	fmt.Println("  HYPRVALET_VOICE_TIMING=1  always show (default)")
+	fmt.Println("  HYPRVALET_VOICE_TIMING=0  silence timing")
+	fmt.Println("  --timing                  force for one invocation")
+}
+
+// llmBackendLabel returns the LLM backend label for timing (just the model,
+// e.g. "llama-3.3-70b" for Groq, "qwen2.5:7b" for Ollama, "cerebras" for
+// realtime). The model name already distinguishes the provider; the timing
+// line prints it as `LLM (llama-3.3-70b): 72ms` per the spec.
+func llmBackendLabel() string {
+	if openai.Available() {
+		m := strings.TrimSpace(os.Getenv("HYPRVALET_OPENAI_MODEL"))
+		if m == "" {
+			m = "gpt-4o-mini"
+		}
+		return m
+	}
+	if groq.Available() {
+		m := strings.TrimSpace(os.Getenv("HYPRVALET_GROQ_MODEL"))
+		if m == "" {
+			m = "llama-3.3-70b"
+		}
+		return m
+	}
+	if shouldUseRealtime() {
+		llm := realtimeLLM()
+		if llm == "cerebras" && hasCerebrasKey() {
+			return "cerebras"
+		}
+		if llm == "cerebras" {
+			return "cerebras (fallback ollama)"
+		}
+		return llm
+	}
+	return envOrDefault("HYPRVALET_MODEL", "qwen2.5:7b")
+}
+
+// fmtDur formats a duration for the timing line: ms below 1s, seconds above.
+func fmtDur(d time.Duration) string {
+	if d <= 0 {
+		return "0ms"
+	}
+	if d < time.Second {
+		return fmt.Sprintf("%dms", d.Milliseconds())
+	}
+	return fmt.Sprintf("%.2fs", d.Seconds())
+}
+
+// timingSpeaker wraps a Speaker and records total Speak time and which backend
+// actually succeeded (via speech.Chain LastBackend or Name()).
+type timingSpeaker struct {
+	inner   speech.Speaker
+	total   time.Duration
+	backend string
+}
+
+func (t *timingSpeaker) Speak(ctx context.Context, text string) error {
+	start := time.Now()
+	err := t.inner.Speak(ctx, text)
+	dur := time.Since(start)
+	t.total += dur
+	if ch, ok := t.inner.(*speech.Chain); ok {
+		if b := ch.LastBackend(); b != "" {
+			t.backend = b
+		}
+	} else if n, ok := t.inner.(interface{ Name() string }); ok {
+		t.backend = n.Name()
+	}
+	if t.backend == "" {
+		// Fallback inference for timing label when Chain has not yet recorded.
+		if elevenlabs.Available() {
+			t.backend = "elevenlabs"
+		} else if strings.EqualFold(strings.TrimSpace(os.Getenv("HYPRVALET_TTS_PREFER")), "piper") {
+			t.backend = "piper"
+		} else if !elevenlabs.Available() && !shouldUseRealtime() {
+			t.backend = "piper"
+		} else {
+			t.backend = "edge-tts"
+		}
+	}
+	return err
+}
+
+// ttsBackendLabel resolves the TTS backend that succeeded, preferring the
+// Chain's LastBackend when available.
+func ttsBackendLabel(s speech.Speaker) string {
+	if ch, ok := s.(*speech.Chain); ok {
+		if b := ch.LastBackend(); b != "" {
+			return b
+		}
+	}
+	if n, ok := s.(interface{ Name() string }); ok {
+		if b := n.Name(); b != "" {
+			return b
+		}
+	}
+	if elevenlabs.Available() {
+		return "elevenlabs"
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("HYPRVALET_TTS_PREFER")), "piper") {
+		return "piper"
+	}
+	if !elevenlabs.Available() && !shouldUseRealtime() {
+		return "piper"
+	}
+	return "edge-tts"
+}
+
+// listenAndTranscribeTimed is the timed variant of listenAndTranscribe: it
+// measures VAD (mic.ListenOnce) and STT (stt.TranscribeWithBackend) separately
+// so the voice loop can show per-step latency plus which STT backend succeeded.
+func listenAndTranscribeTimed(ctx context.Context, wav string, quiet bool, idle time.Duration) (string, listenResult, time.Duration, time.Duration, string) {
+	_ = os.Remove(wav)
+	if !quiet {
+		status("listening", "hablá cuando quieras")
+	}
+	clearWave := listeningWave()
+	tVAD := time.Now()
+	err := mic.ListenOnce(ctx, wav, mic.Params{Idle: idle})
+	vadDur := time.Since(tVAD)
+	clearWave()
+	if ctx.Err() != nil {
+		return "", listenCancel, vadDur, 0, ""
+	}
+	if errors.Is(err, mic.ErrIdle) {
+		return "", listenIdle, vadDur, 0, ""
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		time.Sleep(2 * time.Second)
+		return "", listenNone, vadDur, 0, ""
+	}
+	if !quiet {
+		status("thinking", "")
+	}
+	tSTT := time.Now()
+	text, backend, serr := stt.TranscribeWithBackend(ctx, wav)
+	sttDur := time.Since(tSTT)
+	if serr != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", serr)
+		return "", listenNone, vadDur, sttDur, ""
+	}
+	if strings.TrimSpace(text) == "" {
+		return "", listenNone, vadDur, sttDur, backend
+	}
+	return text, listenGot, vadDur, sttDur, backend
+}
+
+// processTurnTimed runs one transcribed utterance through the gated flow while
+// measuring LLM (reasoning) and TTS (speech) separately. LLM is the time spent
+// in the reasoning path (Ask/Plan via daemon) excluding speech, so the reported
+// LLM and TTS add to the turn's audible latency.
+func processTurnTimed(ctx context.Context, text string, speaker speech.Speaker, confirm func(string) bool) (time.Duration, time.Duration, string, string) {
+	tw := &timingSpeaker{inner: speaker}
+	llmBackend := llmBackendLabel()
+	start := time.Now()
+	if aug, ok := terminalContext(ctx, text); ok {
+		ctlAsk([]string{aug}, tw, confirm, false)
+	} else if isQuestion(text) {
+		ctlAsk([]string{withMemory(text)}, tw, confirm, true)
+	} else {
+		ctlPlan([]string{text}, true, tw, confirm)
+	}
+	elapsed := time.Since(start)
+	ttsDur := tw.total
+	llmDur := elapsed - ttsDur
+	if llmDur < 0 {
+		llmDur = 0
+	}
+	ttsBackend := tw.backend
+	if ttsBackend == "" {
+		ttsBackend = ttsBackendLabel(speaker)
+	}
+	return llmDur, ttsDur, llmBackend, ttsBackend
+}
+
 // voiceCmd is the visible conversation: a HANDS-FREE session in a window. Once
 // it is open you just talk — no wake word between turns. Voice activity
 // detection delimits each turn; the text runs the same reasoned, gated flow as
@@ -1091,7 +1321,13 @@ func idleTimeout() time.Duration {
 // silent for the idle timeout. A first utterance may arrive via
 // HYPRVALET_FIRST (the command spoken with the wake word), so nothing said to
 // open the window is lost.
-func voiceCmd() {
+func voiceCmd(extra []string) {
+	if voiceHelpRequested(extra) {
+		voiceHelp()
+		return
+	}
+	showTiming := voiceTimingEnabled(extra)
+
 	wav := filepath.Join(os.TempDir(), fmt.Sprintf("hyprvalet-voice-%d.wav", os.Getpid()))
 	defer os.Remove(wav)
 
@@ -1155,34 +1391,57 @@ func voiceCmd() {
 	}
 
 	for {
+		turnStart := time.Now()
+		var vadDur, sttDur time.Duration
+		var sttBackend string
 		var text string
 		if pending != "" {
 			// Either the wake-word command, or what the user said while talking
 			// over the assistant — serve it without listening anew.
 			text, pending = pending, ""
+			sttBackend = "wake"
 		} else {
-			t, res := listenAndTranscribe(ctx, wav, false, idle)
+			t, res, vd, sd, backend := listenAndTranscribeTimed(ctx, wav, false, idle)
 			switch res {
 			case listenCancel:
 				return // Ctrl+C or the window closed
 			case listenIdle:
-				say(plain, phrase("bye")) // fell silent — bow out
+				// Fell silent — bow out with a goodbye, timed as a TTS step.
+				t0 := time.Now()
+				say(plain, phrase("bye"))
+				ttsDur := time.Since(t0)
+				ttsBackend := ttsBackendLabel(plain)
+				total := time.Since(turnStart)
+				if showTiming {
+					fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: 0ms | TTS (%s): %s | total: %s\n",
+						fmtDur(vd), backend, fmtDur(sd), ttsBackend, fmtDur(ttsDur), fmtDur(total))
+				}
 				return
 			case listenNone:
 				continue // a failed turn never ends the session
 			}
 			text = t
+			vadDur, sttDur, sttBackend = vd, sd, backend
 		}
 		fmt.Printf("heard: %s\n", text)
 
 		if farewells[normalizeUtterance(text)] {
+			t0 := time.Now()
 			say(plain, phrase("bye"))
+			ttsDur := time.Since(t0)
+			ttsBackend := ttsBackendLabel(plain)
+			total := time.Since(turnStart)
+			if showTiming {
+				fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: 0ms | TTS (%s): %s | total: %s\n",
+					fmtDur(vadDur), sttBackend, fmtDur(sttDur), ttsBackend, fmtDur(ttsDur), fmtDur(total))
+			}
 			return
 		}
 
 		// A request to follow along with Claude enters the watch loop, using
 		// the most recent plan as context for the questions Claude asks.
 		if watchIntent(text) {
+			start := time.Now()
 			plan := lastPlan()
 			if plan == "" {
 				say(plain, pick("I don't have a plan to help Claude with yet.",
@@ -1190,6 +1449,16 @@ func voiceCmd() {
 			} else {
 				watchClaude(ctx, plan, plain, confirm)
 			}
+			if showTiming {
+				total := time.Since(turnStart)
+				handling := total - vadDur - sttDur
+				if handling < 0 {
+					handling = 0
+				}
+				fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: n/a | TTS: n/a | handling: %s | total: %s\n",
+					fmtDur(vadDur), sttBackend, fmtDur(sttDur), fmtDur(handling), fmtDur(total))
+			}
+			_ = start
 			fmt.Println()
 			continue
 		}
@@ -1206,12 +1475,28 @@ func voiceCmd() {
 				}
 				return t, true
 			}
+			start := time.Now()
 			runPlanning(ctx, idea, plain, confirm, ask)
+			if showTiming {
+				total := time.Since(turnStart)
+				handling := total - vadDur - sttDur
+				if handling < 0 {
+					handling = 0
+				}
+				fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: n/a | TTS: n/a | handling: %s | total: %s\n",
+					fmtDur(vadDur), sttBackend, fmtDur(sttDur), fmtDur(handling), fmtDur(total))
+			}
+			_ = start
 			fmt.Println()
 			continue
 		}
 
-		processTurn(ctx, text, speaker, confirm)
+		llmDur, ttsDur, llmBackend, ttsBackend := processTurnTimed(ctx, text, speaker, confirm)
+		total := time.Since(turnStart)
+		if showTiming {
+			fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM (%s): %s | TTS (%s): %s | total: %s\n",
+				fmtDur(vadDur), sttBackend, fmtDur(sttDur), llmBackend, fmtDur(llmDur), ttsBackend, fmtDur(ttsDur), fmtDur(total))
+		}
 		fmt.Println()
 	}
 }
