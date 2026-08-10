@@ -19,10 +19,11 @@ After=network-online.target pipewire.service
 Wants=network-online.target
 
 [Service]
-ExecStart=%h/.local/share/hyprvalet/realtime-venv/bin/speech-to-speech serve --host 127.0.0.1 --port 8765 --stt parakeet-tdt-0.6b-v2 --tts qwen3 --llm_backend responses_api --model_name google/gemma-4-31B --responses_api_base_url https://api.cerebras.ai/v1
+ExecStart=%h/.local/share/hyprvalet/realtime-venv/bin/speech-to-speech --mode realtime --ws_host 127.0.0.1 --ws_port 8765 --device cpu --stt parakeet-tdt --parakeet_tdt_device cpu --tts facebookMMS --tts_language es --llm_backend chat-completions --model_name gemma-4-31b --responses_api_base_url https://api.cerebras.ai/v1 --responses_api_api_key ${CEREBRAS_API_KEY} --no_responses_api_disable_thinking
 Restart=on-failure
 RestartSec=2
 EnvironmentFile=-%h/.config/hyprvalet/env
+Environment=LD_LIBRARY_PATH=%h/.local/share/hyprvalet/realtime-venv/lib/python3.14/site-packages/nvidia/cuda_runtime/lib:%h/.local/share/hyprvalet/realtime-venv/lib/python3.14/site-packages/nvidia/cublas/lib:%h/.local/share/hyprvalet/realtime-venv/lib/python3.14/site-packages/nvidia/cufft/lib:%h/.local/share/hyprvalet/realtime-venv/lib/python3.14/site-packages/nvidia/curand/lib:%h/.local/share/hyprvalet/realtime-venv/lib/python3.14/site-packages/nvidia/cuda_nvrtc/lib:%h/.local/share/hyprvalet/realtime-venv/lib/python3.14/site-packages/nvidia/nvjitlink/lib:%h/.local/share/hyprvalet/realtime-venv/lib/python3.14/site-packages/nvidia/cu13/lib:/opt/cuda/lib64
 # CEREBRAS_API_KEY is read from EnvironmentFile (chmod 0600 ~/.config/hyprvalet/env). Never inline secrets here.
 # Voice: Aiden (en) / es-AR variant configurable via --voice.
 
