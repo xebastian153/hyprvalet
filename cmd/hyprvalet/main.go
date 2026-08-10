@@ -1186,6 +1186,19 @@ func fmtDur(d time.Duration) string {
 	return fmt.Sprintf("%.2fs", d.Seconds())
 }
 
+// emitTiming prints a timing line to stderr (for logs) and to stdout (for the
+// JARVIS UI). The UI copy is dim on a TTY so it sits below the response as a
+// permanent, scrollable line (not an overwritten status), matching the
+// `fmt.Println`/`heard:` channel the screenshot shows. On a pipe it is plain.
+func emitTiming(line string) {
+	fmt.Fprintln(os.Stderr, line)
+	if stdoutIsTTY() {
+		fmt.Printf("\x1b[2m%s\x1b[0m\n", line)
+	} else {
+		fmt.Println(line)
+	}
+}
+
 // timingSpeaker wraps a Speaker and records total Speak time and which backend
 // actually succeeded (via speech.Chain LastBackend or Name()).
 type timingSpeaker struct {
@@ -1413,8 +1426,8 @@ func voiceCmd(extra []string) {
 				ttsBackend := ttsBackendLabel(plain)
 				total := time.Since(turnStart)
 				if showTiming {
-					fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: 0ms | TTS (%s): %s | total: %s\n",
-						fmtDur(vd), backend, fmtDur(sd), ttsBackend, fmtDur(ttsDur), fmtDur(total))
+					emitTiming(fmt.Sprintf("[timing] VAD: %s | STT (%s): %s | LLM: 0ms | TTS (%s): %s | total: %s",
+						fmtDur(vd), backend, fmtDur(sd), ttsBackend, fmtDur(ttsDur), fmtDur(total)))
 				}
 				return
 			case listenNone:
@@ -1432,8 +1445,8 @@ func voiceCmd(extra []string) {
 			ttsBackend := ttsBackendLabel(plain)
 			total := time.Since(turnStart)
 			if showTiming {
-				fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: 0ms | TTS (%s): %s | total: %s\n",
-					fmtDur(vadDur), sttBackend, fmtDur(sttDur), ttsBackend, fmtDur(ttsDur), fmtDur(total))
+				emitTiming(fmt.Sprintf("[timing] VAD: %s | STT (%s): %s | LLM: 0ms | TTS (%s): %s | total: %s",
+					fmtDur(vadDur), sttBackend, fmtDur(sttDur), ttsBackend, fmtDur(ttsDur), fmtDur(total)))
 			}
 			return
 		}
@@ -1455,8 +1468,8 @@ func voiceCmd(extra []string) {
 				if handling < 0 {
 					handling = 0
 				}
-				fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: n/a | TTS: n/a | handling: %s | total: %s\n",
-					fmtDur(vadDur), sttBackend, fmtDur(sttDur), fmtDur(handling), fmtDur(total))
+				emitTiming(fmt.Sprintf("[timing] VAD: %s | STT (%s): %s | LLM: n/a | TTS: n/a | handling: %s | total: %s",
+					fmtDur(vadDur), sttBackend, fmtDur(sttDur), fmtDur(handling), fmtDur(total)))
 			}
 			_ = start
 			fmt.Println()
@@ -1483,8 +1496,8 @@ func voiceCmd(extra []string) {
 				if handling < 0 {
 					handling = 0
 				}
-				fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM: n/a | TTS: n/a | handling: %s | total: %s\n",
-					fmtDur(vadDur), sttBackend, fmtDur(sttDur), fmtDur(handling), fmtDur(total))
+				emitTiming(fmt.Sprintf("[timing] VAD: %s | STT (%s): %s | LLM: n/a | TTS: n/a | handling: %s | total: %s",
+					fmtDur(vadDur), sttBackend, fmtDur(sttDur), fmtDur(handling), fmtDur(total)))
 			}
 			_ = start
 			fmt.Println()
@@ -1494,8 +1507,8 @@ func voiceCmd(extra []string) {
 		llmDur, ttsDur, llmBackend, ttsBackend := processTurnTimed(ctx, text, speaker, confirm)
 		total := time.Since(turnStart)
 		if showTiming {
-			fmt.Fprintf(os.Stderr, "[timing] VAD: %s | STT (%s): %s | LLM (%s): %s | TTS (%s): %s | total: %s\n",
-				fmtDur(vadDur), sttBackend, fmtDur(sttDur), llmBackend, fmtDur(llmDur), ttsBackend, fmtDur(ttsDur), fmtDur(total))
+			emitTiming(fmt.Sprintf("[timing] VAD: %s | STT (%s): %s | LLM (%s): %s | TTS (%s): %s | total: %s",
+				fmtDur(vadDur), sttBackend, fmtDur(sttDur), llmBackend, fmtDur(llmDur), ttsBackend, fmtDur(ttsDur), fmtDur(total)))
 		}
 		fmt.Println()
 	}
