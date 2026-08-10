@@ -218,6 +218,12 @@ func (s *realtimeStub) Chat(ctx context.Context, system, user string) (string, e
 	return "", fmt.Errorf("realtime sidecar chat not available — falling back")
 }
 
+// realtimeQuarantined is the injectable quarantine check for realtime.
+// It defaults to false (no quarantine) but can be overridden in tests or
+// wired to a realtime.Client.IsQuarantined or daemon.IsQuarantined closure.
+// When it returns true, the realtime primary is skipped entirely and batch wins.
+var realtimeQuarantined func() bool = func() bool { return false }
+
 // buildRealtimeReasoner composes realtime→batch with degrade note, preserving
 // bargeSpeaker. When HYPRVALET_REALTIME is off, it returns the batch chain
 // directly (no overhead). When on, it uses fallback.New(realtime, batch) so
@@ -229,9 +235,11 @@ func buildRealtimeReasoner(strong, _unused bool) fallback.Reasoner {
 		return batch
 	}
 	primary := &realtimeStub{strong: strong}
-	// Quarantine provider: currently no global realtime.Client in the CLI, so
-	// we treat not quarantined. Future wiring can pass realtimeClient.IsQuarantined.
-	return realtime.NewRealtimeFallback(primary, batch, func() bool { return false })
+	q := realtimeQuarantined
+	if q == nil {
+		q = func() bool { return false }
+	}
+	return realtime.NewRealtimeFallback(primary, batch, q)
 }
 
 // overload for test compatibility: buildRealtimeReasoner(strong, strong)
