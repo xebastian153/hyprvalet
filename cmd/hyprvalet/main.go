@@ -46,10 +46,10 @@ import (
 	"github.com/xebastian153/hyprvalet/internal/adapters/recipefile"
 	"github.com/xebastian153/hyprvalet/internal/adapters/remind"
 	"github.com/xebastian153/hyprvalet/internal/adapters/speech"
+	"github.com/xebastian153/hyprvalet/internal/adapters/stt"
 	"github.com/xebastian153/hyprvalet/internal/adapters/terminal"
 	"github.com/xebastian153/hyprvalet/internal/adapters/tts"
 	"github.com/xebastian153/hyprvalet/internal/adapters/web"
-	"github.com/xebastian153/hyprvalet/internal/adapters/whisper"
 	"github.com/xebastian153/hyprvalet/internal/core"
 	"github.com/xebastian153/hyprvalet/internal/daemon"
 	"github.com/xebastian153/hyprvalet/internal/protocol"
@@ -1243,7 +1243,7 @@ func (b *bargeSpeaker) Speak(_ context.Context, text string) error {
 			return
 		}
 		tctx, cancel := context.WithTimeout(b.ctx, 60*time.Second)
-		txt, _ := whisper.Default().Transcribe(tctx, b.wav)
+		txt, _ := stt.Transcribe(tctx, b.wav)
 		cancel()
 		captured <- strings.TrimSpace(txt)
 	}()
@@ -1751,7 +1751,7 @@ func listenAndTranscribe(ctx context.Context, wav string, quiet bool, idle time.
 		status("thinking", "")
 	}
 	tctx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	text, err := whisper.Default().Transcribe(tctx, wav)
+	text, err := stt.Transcribe(tctx, wav)
 	cancel()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)

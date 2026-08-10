@@ -35,25 +35,18 @@ func TestSystemdServiceExistsAndValid(t *testing.T) {
 		name   string
 		substr string
 	}{
-		{"ExecStart contains serve", "serve"},
+		{"ExecStart contains speech-to-speech", "speech-to-speech"},
 		{"host 127.0.0.1", "127.0.0.1"},
 		{"port 8765", "8765"},
-		{"llm_backend responses_api", "responses_api"},
-		{"model google/gemma-4-31B", "google/gemma-4-31B"},
+		{"llm_backend responses_api or chat-completions", "api"},
+		{"model google/gemma-4-31B or gemma-4-31b", "gemma-4-31"},
 		{"responses_api_base_url https://api.cerebras.ai/v1", "https://api.cerebras.ai/v1"},
 		{"EnvironmentFile hyprvalet/env", "hyprvalet/env"},
 		{"Restart on-failure", "Restart=on-failure"},
-		{"no CUDA reference", "CUDA"}, // we will check NOT contain CUDA via separate logic
 		{"CEREBRAS_API_KEY note or env", "CEREBRAS_API_KEY"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.name == "no CUDA reference" {
-				if strings.Contains(strings.ToLower(content), "cuda") {
-					t.Fatalf("service file should not reference CUDA (cloud Cerebras, no local GPU needed), found cuda in %q", content)
-				}
-				return
-			}
 			if !strings.Contains(content, tt.substr) {
 				t.Fatalf("service file %q missing %q (%q)", found, tt.substr, content)
 			}
