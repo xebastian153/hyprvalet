@@ -2338,17 +2338,22 @@ func ctlCmd(args []string) {
 // availability never degrades — only the first-try latency.
 func speakerChain() speech.Speaker {
 	var speakers []speech.Speaker
-	if elevenlabs.Available() {
-		speakers = append(speakers, elevenlabs.Default())
-	}
 	preferPiper := strings.EqualFold(strings.TrimSpace(os.Getenv("HYPRVALET_TTS_PREFER")), "piper")
 	if !preferPiper && !elevenlabs.Available() && !shouldUseRealtime() {
 		// Batch mode without ElevenLabs: speed wins — piper local before cloud.
 		preferPiper = true
 	}
 	if preferPiper {
-		speakers = append(speakers, tts.Default(), edgetts.Default())
+		// HYPRVALET_TTS_PREFER=piper forces piper first even when ElevenLabs is available — piper is ~323ms vs ElevenLabs 5-9s.
+		speakers = append(speakers, tts.Default())
+		if elevenlabs.Available() {
+			speakers = append(speakers, elevenlabs.Default())
+		}
+		speakers = append(speakers, edgetts.Default())
 	} else {
+		if elevenlabs.Available() {
+			speakers = append(speakers, elevenlabs.Default())
+		}
 		speakers = append(speakers, edgetts.Default(), tts.Default())
 	}
 	return speech.NewChain(speakers...)
